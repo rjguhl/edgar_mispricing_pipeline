@@ -1,0 +1,39 @@
+# Ingestion
+requests>=2.31.0
+sec-edgar-downloader>=5.0.0
+fredapi>=0.5.1
+boto3>=1.34.0
+
+# Orchestration
+apache-airflow>=2.8.0
+
+# Transformation
+dbt-postgres>=1.7.0
+
+# NLP & Features
+anthropic>=0.40.0
+spacy>=3.7.0
+
+# Modeling
+xgboost>=2.0.0
+lightgbm>=4.3.0
+scikit-learn>=1.4.0
+numpy>=1.26.0
+pandas>=2.2.0
+
+# Database
+psycopg2-binary>=2.9.9
+sqlalchemy>=2.0.0
+
+# Dashboard
+streamlit>=1.31.0
+matplotlib>=3.8.0
+plotly>=5.18.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.5.0
+
+# Testing
+pytest>=8.0.0
+pytest-cov>=4.1.0

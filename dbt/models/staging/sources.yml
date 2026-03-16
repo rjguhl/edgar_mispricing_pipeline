@@ -1,0 +1,39 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: "Raw data loaded by the ingestion layer from S3"
+    tables:
+      - name: edgar_transcripts
+        description: "SEC EDGAR earnings call transcripts"
+        columns:
+          - name: ticker
+            tests:
+              - not_null
+          - name: filing_date
+            tests:
+              - not_null
+          - name: transcript_text
+            tests:
+              - not_null
+
+      - name: fred_indicators
+        description: "FRED macroeconomic indicator time series"
+        columns:
+          - name: indicator_id
+            tests:
+              - not_null
+          - name: observation_date
+            tests:
+              - not_null
+
+      - name: contract_prices
+        description: "Kalshi and Polymarket contract price snapshots"
+        columns:
+          - name: contract_id
+            tests:
+              - not_null
+          - name: price
+            tests:
+              - not_null
