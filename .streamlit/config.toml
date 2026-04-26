@@ -1,0 +1,13 @@
+# Streamlit theme — dark, plotly-friendly. Matches the signal-card CSS in
+# src/dashboard/app.py.
+
+[theme]
+base = "dark"
+primaryColor = "#38b676"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#1c1f26"
+textColor = "#fafafa"
+
+[server]
+headless = true
+runOnSave = true
