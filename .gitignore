@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+.env.local
+*.env
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Data + models (don't commit large/private artifacts)
+data/raw/
+data/processed/
+models/*.pkl
+*.parquet
+*.h5
+
+# Logs
+logs/
+*.log
+
+# Airflow
+airflow.cfg
+airflow.db
+airflow-webserver.pid
+standalone_admin_password.txt
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
+
+# Test/coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Claude Code local settings
+.claude/
