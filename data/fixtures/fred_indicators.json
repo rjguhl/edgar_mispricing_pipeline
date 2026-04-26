@@ -1,0 +1,34 @@
+[
+  {"indicator_id": "CPIAUCSL", "indicator_name": "Consumer Price Index (All Urban Consumers)", "observation_date": "2025-11-01", "value": 316.4, "units": "index"},
+  {"indicator_id": "CPIAUCSL", "indicator_name": "Consumer Price Index (All Urban Consumers)", "observation_date": "2025-12-01", "value": 317.1, "units": "index"},
+  {"indicator_id": "CPIAUCSL", "indicator_name": "Consumer Price Index (All Urban Consumers)", "observation_date": "2026-01-01", "value": 317.9, "units": "index"},
+  {"indicator_id": "CPIAUCSL", "indicator_name": "Consumer Price Index (All Urban Consumers)", "observation_date": "2026-02-01", "value": 318.5, "units": "index"},
+  {"indicator_id": "CPIAUCSL", "indicator_name": "Consumer Price Index (All Urban Consumers)", "observation_date": "2026-03-01", "value": 319.3, "units": "index"},
+
+  {"indicator_id": "UNRATE", "indicator_name": "Unemployment Rate", "observation_date": "2025-11-01", "value": 4.1, "units": "percent"},
+  {"indicator_id": "UNRATE", "indicator_name": "Unemployment Rate", "observation_date": "2025-12-01", "value": 4.0, "units": "percent"},
+  {"indicator_id": "UNRATE", "indicator_name": "Unemployment Rate", "observation_date": "2026-01-01", "value": 4.0, "units": "percent"},
+  {"indicator_id": "UNRATE", "indicator_name": "Unemployment Rate", "observation_date": "2026-02-01", "value": 4.1, "units": "percent"},
+  {"indicator_id": "UNRATE", "indicator_name": "Unemployment Rate", "observation_date": "2026-03-01", "value": 4.2, "units": "percent"},
+
+  {"indicator_id": "T10Y2Y", "indicator_name": "10-Year / 2-Year Treasury Yield Spread", "observation_date": "2026-01-15", "value": 0.32, "units": "percent"},
+  {"indicator_id": "T10Y2Y", "indicator_name": "10-Year / 2-Year Treasury Yield Spread", "observation_date": "2026-02-15", "value": 0.41, "units": "percent"},
+  {"indicator_id": "T10Y2Y", "indicator_name": "10-Year / 2-Year Treasury Yield Spread", "observation_date": "2026-03-15", "value": 0.38, "units": "percent"},
+  {"indicator_id": "T10Y2Y", "indicator_name": "10-Year / 2-Year Treasury Yield Spread", "observation_date": "2026-04-15", "value": 0.45, "units": "percent"},
+
+  {"indicator_id": "UMCSENT", "indicator_name": "University of Michigan Consumer Sentiment", "observation_date": "2025-12-01", "value": 74.0, "units": "index"},
+  {"indicator_id": "UMCSENT", "indicator_name": "University of Michigan Consumer Sentiment", "observation_date": "2026-01-01", "value": 71.8, "units": "index"},
+  {"indicator_id": "UMCSENT", "indicator_name": "University of Michigan Consumer Sentiment", "observation_date": "2026-02-01", "value": 70.2, "units": "index"},
+  {"indicator_id": "UMCSENT", "indicator_name": "University of Michigan Consumer Sentiment", "observation_date": "2026-03-01", "value": 68.5, "units": "index"},
+
+  {"indicator_id": "FEDFUNDS", "indicator_name": "Federal Funds Effective Rate", "observation_date": "2025-12-01", "value": 4.33, "units": "percent"},
+  {"indicator_id": "FEDFUNDS", "indicator_name": "Federal Funds Effective Rate", "observation_date": "2026-01-01", "value": 4.33, "units": "percent"},
+  {"indicator_id": "FEDFUNDS", "indicator_name": "Federal Funds Effective Rate", "observation_date": "2026-02-01", "value": 4.33, "units": "percent"},
+  {"indicator_id": "FEDFUNDS", "indicator_name": "Federal Funds Effective Rate", "observation_date": "2026-03-01", "value": 4.33, "units": "percent"},
+  {"indicator_id": "FEDFUNDS", "indicator_name": "Federal Funds Effective Rate", "observation_date": "2026-04-01", "value": 4.08, "units": "percent"},
+
+  {"indicator_id": "INDPRO", "indicator_name": "Industrial Production Index", "observation_date": "2025-12-01", "value": 103.4, "units": "index"},
+  {"indicator_id": "INDPRO", "indicator_name": "Industrial Production Index", "observation_date": "2026-01-01", "value": 103.7, "units": "index"},
+  {"indicator_id": "INDPRO", "indicator_name": "Industrial Production Index", "observation_date": "2026-02-01", "value": 103.9, "units": "index"},
+  {"indicator_id": "INDPRO", "indicator_name": "Industrial Production Index", "observation_date": "2026-03-01", "value": 104.1, "units": "index"}
+]

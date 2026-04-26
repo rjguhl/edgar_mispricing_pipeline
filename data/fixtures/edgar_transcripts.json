@@ -1,0 +1,47 @@
+[
+  {
+    "ticker": "AAPL",
+    "filing_date": "2026-01-30",
+    "fiscal_quarter": "Q1",
+    "fiscal_year": 2026,
+    "filing_url": "https://www.sec.gov/Archives/edgar/data/320193/example-aapl-q1-2026.htm",
+    "transcript_text": "Apple Inc. fiscal first quarter 2026 results. Revenue of $124.3 billion, up 4 percent year over year, an all-time record. Services revenue of $26.3 billion set another all-time high. iPhone revenue grew slightly with strong demand for our Pro models. We are raising our full-year services growth outlook on the strength of paid subscription momentum and engagement across our installed base. Operating margin expanded 90 basis points reflecting favorable mix and disciplined cost management. We see continued momentum in emerging markets and expect double-digit services growth in the next quarter. Capital allocation remains a priority and we returned $30 billion to shareholders this quarter. Management remains confident in the long-term opportunities in AI integration, spatial computing, and our installed base monetization. Forward guidance for the next quarter implies high-single-digit revenue growth.",
+    "loaded_at": "2026-04-25T08:00:00Z"
+  },
+  {
+    "ticker": "MSFT",
+    "filing_date": "2026-01-29",
+    "fiscal_quarter": "Q2",
+    "fiscal_year": 2026,
+    "filing_url": "https://www.sec.gov/Archives/edgar/data/789019/example-msft-q2-2026.htm",
+    "transcript_text": "Microsoft Corporation fiscal second quarter 2026 results. Revenue of $69.6 billion grew 12 percent. Microsoft Cloud revenue was $40.9 billion, up 21 percent year over year. Azure and other cloud services revenue grew 31 percent with AI services contributing 13 points to that growth. We are seeing strong demand for our Copilot suite across enterprise customers and we are raising our full-year cloud growth guidance. Capital expenditures will increase substantially in the second half of the fiscal year as we expand AI infrastructure capacity. Management tone is confident with respect to commercial bookings, which grew 67 percent driven by large multi-year Azure contracts. We are mindful of foreign exchange headwinds and the cost of accelerated AI infrastructure investment but believe the long-term return justifies the spend.",
+    "loaded_at": "2026-04-25T08:00:00Z"
+  },
+  {
+    "ticker": "GOOGL",
+    "filing_date": "2026-02-04",
+    "fiscal_quarter": "Q4",
+    "fiscal_year": 2025,
+    "filing_url": "https://www.sec.gov/Archives/edgar/data/1652044/example-googl-q4-2025.htm",
+    "transcript_text": "Alphabet Inc. fourth quarter 2025 results. Total revenue of $96.5 billion, up 12 percent year over year. Google Cloud revenue of $11.9 billion grew 30 percent. Search revenue grew 13 percent reflecting strong query growth and improved monetization from AI Overviews. YouTube ads revenue of $10.5 billion grew 14 percent. Operating income was $30.7 billion with operating margin of 32 percent. We see significant opportunity in the application of generative AI across our products. Capital expenditures for the full year were $52 billion and we expect this level to be sustained or slightly higher in 2026 as we scale AI infrastructure. Forward guidance maintained at low double-digit revenue growth. Some softness in advertiser sentiment in financial services and insurance verticals.",
+    "loaded_at": "2026-04-25T08:00:00Z"
+  },
+  {
+    "ticker": "TSLA",
+    "filing_date": "2026-01-29",
+    "fiscal_quarter": "Q4",
+    "fiscal_year": 2025,
+    "filing_url": "https://www.sec.gov/Archives/edgar/data/1318605/example-tsla-q4-2025.htm",
+    "transcript_text": "Tesla Inc. fourth quarter 2025 results. Total revenue of $25.7 billion was below our internal plan, declining 6 percent year over year. Automotive gross margin excluding regulatory credits was 13.6 percent compressed by ongoing pricing actions and FSD-related discounts. We are lowering our full-year delivery growth guidance for 2026 to reflect a slower than expected ramp at our new Mexico facility and softer demand in Europe. Energy storage continues to be a bright spot with deployments up 244 percent. Management acknowledged near-term challenges including affordable model launch timing and macro pressures on big-ticket consumer purchases. Robotaxi deployment timeline remains on track for late 2026. Capital expenditures will be elevated as we continue investing in next-generation vehicle platforms and Optimus.",
+    "loaded_at": "2026-04-25T08:00:00Z"
+  },
+  {
+    "ticker": "NVDA",
+    "filing_date": "2026-02-26",
+    "fiscal_quarter": "Q4",
+    "fiscal_year": 2026,
+    "filing_url": "https://www.sec.gov/Archives/edgar/data/1045810/example-nvda-q4-2026.htm",
+    "transcript_text": "NVIDIA Corporation fourth quarter fiscal 2026 results. Record revenue of $39.3 billion grew 78 percent year over year. Data Center revenue of $35.6 billion was a new record, up 93 percent. Blackwell production ramp is going well and demand visibility is exceptional through 2027. Gross margin of 73 percent. We are raising full-year guidance and see Blackwell Ultra ramping in the second half. Forward guidance for next quarter is $43 billion plus or minus two percent. Management tone is highly confident with respect to AI infrastructure demand. Some concerns around export controls and supply chain capacity for advanced packaging but we have meaningfully expanded supplier base. Sovereign AI deployments are emerging as a meaningful growth vector.",
+    "loaded_at": "2026-04-25T08:00:00Z"
+  }
+]

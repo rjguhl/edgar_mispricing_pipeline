@@ -1,0 +1,16 @@
+[
+  {"contract_id": "KX-AAPL-Q1-26-BEAT", "platform": "kalshi", "ticker": "AAPL", "event_type": "earnings_beat", "event_date": "2026-01-30", "price": 0.62, "volume": 14820, "snapshot_ts": "2026-01-29T18:00:00Z"},
+  {"contract_id": "PM-AAPL-Q1-26-BEAT", "platform": "polymarket", "ticker": "AAPL", "event_type": "earnings_beat", "event_date": "2026-01-30", "price": 0.65, "volume": 9750, "snapshot_ts": "2026-01-29T18:00:00Z"},
+
+  {"contract_id": "KX-MSFT-Q2-26-BEAT", "platform": "kalshi", "ticker": "MSFT", "event_type": "earnings_beat", "event_date": "2026-01-29", "price": 0.71, "volume": 22100, "snapshot_ts": "2026-01-28T18:00:00Z"},
+  {"contract_id": "PM-MSFT-Q2-26-BEAT", "platform": "polymarket", "ticker": "MSFT", "event_type": "earnings_beat", "event_date": "2026-01-29", "price": 0.74, "volume": 18650, "snapshot_ts": "2026-01-28T18:00:00Z"},
+
+  {"contract_id": "KX-GOOGL-Q4-25-BEAT", "platform": "kalshi", "ticker": "GOOGL", "event_type": "earnings_beat", "event_date": "2026-02-04", "price": 0.58, "volume": 11200, "snapshot_ts": "2026-02-03T18:00:00Z"},
+  {"contract_id": "PM-GOOGL-Q4-25-BEAT", "platform": "polymarket", "ticker": "GOOGL", "event_type": "earnings_beat", "event_date": "2026-02-04", "price": 0.61, "volume": 8400, "snapshot_ts": "2026-02-03T18:00:00Z"},
+
+  {"contract_id": "KX-TSLA-Q4-25-BEAT", "platform": "kalshi", "ticker": "TSLA", "event_type": "earnings_beat", "event_date": "2026-01-29", "price": 0.48, "volume": 31200, "snapshot_ts": "2026-01-28T18:00:00Z"},
+  {"contract_id": "PM-TSLA-Q4-25-BEAT", "platform": "polymarket", "ticker": "TSLA", "event_type": "earnings_beat", "event_date": "2026-01-29", "price": 0.45, "volume": 29800, "snapshot_ts": "2026-01-28T18:00:00Z"},
+
+  {"contract_id": "KX-NVDA-Q4-26-BEAT", "platform": "kalshi", "ticker": "NVDA", "event_type": "earnings_beat", "event_date": "2026-02-26", "price": 0.78, "volume": 48700, "snapshot_ts": "2026-02-25T18:00:00Z"},
+  {"contract_id": "PM-NVDA-Q4-26-BEAT", "platform": "polymarket", "ticker": "NVDA", "event_type": "earnings_beat", "event_date": "2026-02-26", "price": 0.81, "volume": 42300, "snapshot_ts": "2026-02-25T18:00:00Z"}
+]
