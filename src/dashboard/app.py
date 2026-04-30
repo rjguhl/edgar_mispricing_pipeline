@@ -17,12 +17,6 @@ import json
 import sys
 from pathlib import Path
 
-# Ensure the project root is importable when launched via
-# `streamlit run src/dashboard/app.py` (Streamlit doesn't add CWD to sys.path).
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
-
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -30,6 +24,12 @@ import streamlit as st
 from src.config import Config
 from src.pipeline import run as run_pipeline
 from src.processing.macro_features import MacroFeatureBuilder
+
+# Ensure the project root is importable when launched via
+# `streamlit run src/dashboard/app.py` (Streamlit doesn't add CWD to sys.path).
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
 SIGNALS_PATH = Path("data/processed/signals.json")
 FIXTURES_DIR = Path(Config.FIXTURES_DIR)
