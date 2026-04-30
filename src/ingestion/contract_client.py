@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 import requests
+import re
 
 from src.config import Config
 
@@ -258,8 +259,6 @@ def _polymarket_to_common(m: dict) -> dict:
 # ----------------------------------------------------------------------
 # Tiny inference helpers — pure functions, easy to unit test
 # ----------------------------------------------------------------------
-
-import re
 
 _TICKER_TOKEN_RE = re.compile(r"\b([A-Z]{1,5})\b")
 
