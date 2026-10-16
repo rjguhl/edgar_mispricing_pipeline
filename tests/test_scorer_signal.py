@@ -252,3 +252,37 @@ class TestBacktestScoring:
         assert out["trades"] == 2 and out["buy_yes"] == 1 and out["buy_no"] == 1
         assert np.isclose(out["total_pnl"], 0.10)
         assert np.isclose(out["return_on_cost"], 0.10 / 0.90)
+
+
+class TestSlugParsing:
+    def test_negative_consensus_and_basis(self):
+        from src.ingestion.contract_client import _eps_terms_from_slug, _release_date_from_slug
+
+        slug = "aal-quarterly-earnings-nongaap-eps-10-22-2026-neg0pt34"
+        assert _release_date_from_slug(slug) == "2026-10-22"
+        assert _eps_terms_from_slug(slug) == ("nongaap", -0.34)
+        assert _eps_terms_from_slug("mtb-quarterly-earnings-gaap-eps-10-16-2026-5pt00") == ("gaap", 5.0)
+        assert _eps_terms_from_slug("will-texas-roadhouse-txrh-beat-quarterly-earnings") == ("", None)
+
+
+class TestOrderBookSummary:
+    def test_top_of_book_and_depth(self):
+        from src.ingestion.orderbook_collector import summarize_book
+
+        out = summarize_book(
+            {
+                "bids": [{"price": "0.60", "size": "50"}, {"price": "0.57", "size": "10"}, {"price": "0.01", "size": "20"}],
+                "asks": [{"price": "0.66", "size": "5"}, {"price": "0.99", "size": "100"}],
+                "last_trade_price": "0.40",
+            }
+        )
+        assert out["best_bid"] == 0.60 and out["best_ask"] == 0.66
+        assert np.isclose(out["spread"], 0.06) and np.isclose(out["mid"], 0.63)
+        assert out["bid_depth_5c"] == 60.0  # 0.60 and 0.57 levels; 0.01 excluded
+        assert out["ask_depth_5c"] == 5.0
+
+    def test_one_sided_book(self):
+        from src.ingestion.orderbook_collector import summarize_book
+
+        out = summarize_book({"bids": [{"price": "0.60", "size": "50"}], "asks": []})
+        assert out["best_ask"] is None and out["spread"] is None and out["mid"] is None

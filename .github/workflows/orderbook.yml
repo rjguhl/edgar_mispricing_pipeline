@@ -1,0 +1,56 @@
+name: Order-book snapshots
+
+# Hourly snapshot of every open Polymarket earnings contract's order book,
+# committed to the `orderbook-data` branch (kept off main so code history
+# stays clean). See src/ingestion/orderbook_collector.py.
+
+on:
+  schedule:
+    - cron: "17 * * * *"  # hourly; off the top of the hour to dodge scheduler congestion
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: orderbook
+  cancel-in-progress: false
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install requests python-dotenv
+
+      - name: Check out data branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git fetch origin orderbook-data; then
+            git worktree add data-branch origin/orderbook-data
+            git -C data-branch checkout -B orderbook-data
+          else
+            git worktree add --detach data-branch
+            git -C data-branch checkout --orphan orderbook-data
+            git -C data-branch rm -rfq .
+          fi
+
+      - name: Snapshot order books
+        run: python -m src.ingestion.orderbook_collector --out data-branch/snapshots
+
+      - name: Commit snapshots
+        run: |
+          cd data-branch
+          git add snapshots
+          git diff --cached --quiet && exit 0
+          git commit -qm "Order-book snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push origin orderbook-data

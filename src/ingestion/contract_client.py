@@ -257,21 +257,31 @@ def _to_float(value) -> float | None:
         return None
 
 
-# Earnings market slugs end with the expected release date and consensus
-# EPS, e.g. "cfg-quarterly-earnings-nongaap-eps-10-16-2026-1pt40". The
-# market's endDate is only a resolution deadline (often weeks later), so
+# Earnings market slugs encode the EPS basis, expected release date and
+# consensus threshold, e.g. "cfg-quarterly-earnings-nongaap-eps-10-16-2026-1pt40"
+# or, for a loss, "aal-quarterly-earnings-nongaap-eps-10-22-2026-neg0pt34".
+# The market's endDate is only a resolution deadline (often weeks later), so
 # the release date is what we time against.
-_SLUG_RELEASE_DATE_RE = re.compile(r"-(\d{2})-(\d{2})-(\d{4})-\d+pt\d+$")
+_SLUG_RE = re.compile(
+    r"-(?P<basis>gaap|nongaap)-eps-(?P<month>\d{2})-(?P<day>\d{2})-(?P<year>\d{4})"
+    r"-(?P<neg>neg)?(?P<whole>\d+)pt(?P<frac>\d+)$"
+)
 _PAREN_TICKER_RE = re.compile(r"\(([A-Z]{1,5}(?:\.[A-Z])?)\)")
 _TICKER_TOKEN_RE = re.compile(r"\b([A-Z]{1,5})\b")
 
 
 def _release_date_from_slug(slug: str) -> str:
-    match = _SLUG_RELEASE_DATE_RE.search(slug or "")
+    match = _SLUG_RE.search(slug or "")
+    return f"{match['year']}-{match['month']}-{match['day']}" if match else ""
+
+
+def _eps_terms_from_slug(slug: str) -> tuple[str, float | None]:
+    """(basis, consensus EPS threshold) — e.g. ("nongaap", -0.34)."""
+    match = _SLUG_RE.search(slug or "")
     if not match:
-        return ""
-    month, day, year = match.groups()
-    return f"{year}-{month}-{day}"
+        return "", None
+    threshold = float(f"{match['whole']}.{match['frac']}")
+    return match["basis"], -threshold if match["neg"] else threshold
 
 
 def _ticker_from_question(question: str) -> str:

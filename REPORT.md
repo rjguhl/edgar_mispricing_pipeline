@@ -2,7 +2,7 @@
 
 **Question:** Can public information (SEC filings parsed by an LLM, EPS history, macro data) forecast quarterly earnings outcomes better than prediction markets?
 
-**Short answer:** No — not with these inputs. Polymarket's earnings contracts are well calibrated and clearly beat every model built here. The LLM-extracted text features carried no measurable out-of-sample signal. The useful outputs are a rigorous, leak-free evaluation framework, a confirmed (small) EPS-surprise signal, and one borderline market inefficiency worth testing with more data.
+**Short answer:** No — not with these inputs. Polymarket's earnings contracts are well calibrated and clearly beat every model built here. The LLM-extracted text features carried no measurable out-of-sample signal. The useful outputs are a rigorous, leak-free evaluation framework, a confirmed (small) EPS-surprise signal, and evidence that any remaining market inefficiency is smaller than the bid/ask spread.
 
 All numbers below are reproducible with the commands in [Reproducing](#reproducing). Total LLM spend for the whole project: ~$1.80.
 
@@ -12,53 +12,55 @@ All numbers below are reproducible with the commands in [Reproducing](#reproduci
 
 | # | Finding | Evidence | Confidence |
 |---|---|---|---|
-| 1 | **Polymarket beats the model** on earnings beat/miss forecasts | Brier 0.137 vs 0.163, ROC AUC 0.79 vs 0.64, 1,111 resolved contracts | High |
-| 2 | **The model adds nothing on top of the market** | Logistic blend of market + model: Brier 0.1312 vs market alone 0.1307 (out-of-sample half) | High |
+| 1 | **Polymarket beats the model** on earnings beat/miss forecasts | Brier 0.143 vs 0.174, ROC AUC 0.80 vs 0.66, 1,256 resolved contracts | High |
+| 2 | **The model adds nothing on top of the market** | Logistic blend of market + model: Brier 0.1364 vs market alone 0.1364 (out-of-sample half) | High |
 | 3 | **LLM text features don't predict the price reaction** to earnings | Walk-forward AUC 0.50 (text only); no feature significant | High |
 | 4 | **EPS surprise vs. consensus does** (modestly) | Spearman ρ = +0.16, p = 0.007; walk-forward AUC 0.54 | Medium |
 | 5 | **Beats are predictable from beat history** | Beat model: Brier 0.169 vs 0.185 base rate, AUC 0.69 on 2,157 held-out releases | High |
-| 6 | **Polymarket may slightly underprice beats** | Actual beat rate 77.8% vs avg price 75.6%; buy-YES-everything +2.2¢/contract, 95% CI [+0.0¢, +4.4¢] | Low — borderline, pre-spread |
+| 6 | **No tradable edge** | Best strategy (buy YES on every contract) +1.7¢/contract, 95% CI [−0.4¢, +3.8¢], before a median 29¢ bid/ask spread | High |
 
 ---
 
 ## 2. Model vs. market backtest
 
 **Setup** (`src/modeling/backtest.py`)
-- 1,111 resolved Polymarket "Will X beat quarterly earnings?" contracts, Oct 2025 – Oct 2026, 363 companies.
+- 1,256 resolved Polymarket "Will X beat quarterly earnings?" contracts, Oct 2025 – Oct 2026, 387 companies.
 - **Market probability:** last traded YES price before 00:00 UTC on the release date (the prior US evening — before both pre-market and after-close announcements).
 - **Model probability:** next-quarter beat model, **walk-forward** — retrained each calendar quarter using only outcomes public before that quarter. No contract is scored by a model that saw its result.
 - **Outcome:** how the contract actually resolved.
 
-**Accuracy on the same 1,111 contracts**
+**Accuracy on the same 1,256 contracts**
 
 | Forecast | Brier ↓ | Log loss ↓ | ROC AUC ↑ |
 |---|---|---|---|
-| **Polymarket** | **0.137** | **0.430** | **0.786** |
-| Beat model | 0.163 | 0.505 | 0.641 |
-| Base rate (~75%) | 0.173 | 0.531 | 0.500 |
+| **Polymarket** | **0.143** | **0.444** | **0.800** |
+| Beat model | 0.174 | 0.529 | 0.663 |
+| Base rate (~75%) | 0.188 | 0.564 | 0.500 |
 
 **Calibration — the market is well calibrated**
 
 | Market price bucket | Contracts | Avg price | Actual beat rate |
 |---|---|---|---|
-| 0–20% | 25 | 10% | 16% |
-| 20–40% | 87 | 31% | 38% |
-| 40–60% | 101 | 51% | 53% |
-| 60–80% | 263 | 72% | 76% |
-| 80–100% | 635 | 90% | 91% |
+| 0–20% | 40 | 10% | 15% |
+| 20–40% | 113 | 31% | 35% |
+| 40–60% | 136 | 51% | 51% |
+| 60–80% | 306 | 72% | 75% |
+| 80–100% | 661 | 89% | 90% |
 
-Note that the actual beat rate sits slightly *above* the price in every bucket — the source of finding #6.
+The actual beat rate sits slightly *above* the price in most buckets (overall 74.8% vs. an average price of 73.2%), but the gap is not statistically significant.
 
 **Trading simulation** (buy the side the model favors when it disagrees with the market by more than a threshold; $1 payout contracts, no fees or spread)
 
 | Threshold | Trades | P&L per trade | 95% CI |
 |---|---|---|---|
-| 10 pts | 574 | +2.5¢ | [−0.5¢, +5.5¢] |
-| 20 pts | 206 | +3.4¢ | [−2.4¢, +9.2¢] |
-| 10 pts, buy-YES side only | 235 | +5.8¢ | [−0.1¢, +11.8¢] |
-| Buy YES on every contract | 1,111 | +2.2¢ | [+0.0¢, +4.4¢] |
+| 10 pts | 679 | +1.1¢ | [−1.6¢, +3.9¢] |
+| 20 pts | 257 | +0.9¢ | [−4.3¢, +6.0¢] |
+| 10 pts, buy-YES side only | 300 | +3.0¢ | [−2.0¢, +8.2¢] |
+| Buy YES on every contract | 1,256 | +1.7¢ | [−0.4¢, +3.8¢] |
 
-None of these is a demonstrated edge: every interval touches zero, and real execution would pay the bid/ask spread. These markets are thin (median volume ≈ $6,000; 44% under $5,000), so spreads of several cents are common — enough to erase all of the above. The buy-YES results all point the same way (beats slightly underpriced), which makes it the one lead worth re-testing as more contracts resolve, ideally with order-book prices instead of last trades.
+None of these is a demonstrated edge: every interval includes zero, and the figures use last-trade prices, not executable ones. Live order-book snapshots show a **median bid/ask spread of 29¢** across open earnings contracts — many sit at placeholder quotes (bid ≈ 0.20, ask ≈ 0.90) until about a week before release — and only a handful trade at 1–5¢ spreads. Crossing that spread costs far more than the 1–3¢ the simulated strategies earn.
+
+An earlier run on 1,111 contracts showed buy-YES-everything at +2.2¢ with a CI just touching zero. A slug-parsing bug had excluded every contract with a negative EPS consensus (loss-making companies); with those 145 contracts restored, the effect shrank to +1.7¢ and lost significance. This is the main reason small backtest edges shouldn't be trusted until they survive the full sample and realistic costs.
 
 ---
 
@@ -117,6 +119,8 @@ Problems found and fixed along the way — each would have silently corrupted re
 | Open contracts whose earnings already happened | "Mispricings" that are just unsettled outcomes | Drop contracts past their release date |
 | LLM responses with thinking blocks / markdown fences | **0 of 44** extractions succeeded on the first paid run | Structured outputs (enforced JSON schema) |
 | Backtest model could see the outcomes it was graded on | Inflated model accuracy | Walk-forward retraining per quarter |
+| Slug parser rejected **negative** EPS thresholds (`…-neg0pt34`) | Every loss-making company silently dropped from backtest and live signals (145 contracts); inflated the apparent edge | Parse the optional `neg` prefix |
+| Order-book `last_trade_price` often reports the NO side (0.04 on a 0.92/0.93 YES book) | Inverted prices in any analysis built on it | Use best bid/ask; field kept only for reference |
 | Real API keys pasted into tracked `.env.example` | Keys published on commit | Caught before commit; reset to placeholders |
 
 Cost controls: extraction cache keyed by (model, filing), `--cached-only` training flag, and a switch from Sonnet to Haiku cut per-run extraction cost ~20×.
@@ -125,8 +129,8 @@ Cost controls: extraction cache keyed by (model, filing), `--cached-only` traini
 
 ## 6. Limitations
 
-- **One year of contracts.** Polymarket's earnings markets only go back to late 2025; 1,111 contracts is enough to rank forecasts but thin for trading conclusions.
-- **Last-trade prices**, not executable bid/ask. Real fills would be worse.
+- **One year of contracts.** Polymarket's earnings markets only go back to late 2025; 1,256 contracts is enough to rank forecasts but thin for trading conclusions.
+- **Last-trade prices**, not executable bid/ask, in the historical backtest. Polymarket keeps no order-book history, so executable prices exist only from the start of live collection (Oct 16, 2026).
 - **Consensus mismatch.** Polymarket's threshold is the consensus at market creation (sometimes GAAP, sometimes non-GAAP); the model learns from Yahoo's consensus. Some disagreement is definitional, not informational.
 - **LLM study covers 20 large caps.** Text features might matter more for smaller, less-covered companies — untested (budget).
 - **Price-reaction label is noisy** (±1 day abnormal return vs. SPY, no factor model).
@@ -135,7 +139,7 @@ Cost controls: extraction cache keyed by (model, filing), `--cached-only` traini
 
 ## 7. What would be worth doing next
 
-1. **Re-test the beat-underpricing lead** as more contracts resolve, using CLOB order-book prices (best ask) instead of last trades. This is the only result that could become a real edge.
+1. **Execution-realistic testing.** Hourly order-book snapshots of every open earnings contract are now collected automatically (`src/ingestion/orderbook_collector.py`, GitHub Actions → `orderbook-data` branch). As contracts resolve, re-test at executable prices, measure how spreads and prices evolve into the release, and paper-trade a pre-registered strategy restricted to tight-spread markets.
 2. **Use the LLM on what the market doesn't price well:** earnings-call *Q&A* transcripts (not press releases), or guidance language for small caps with little analyst coverage.
 3. **Kalshi/Polymarket "mention" markets** ("Will the CEO say X on the call?") — a direct fit for transcript NLP.
 

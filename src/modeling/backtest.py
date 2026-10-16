@@ -33,7 +33,12 @@ import numpy as np
 import pandas as pd
 import requests
 
-from src.ingestion.contract_client import ContractClient, _release_date_from_slug, _ticker_from_question
+from src.ingestion.contract_client import (
+    ContractClient,
+    _eps_terms_from_slug,
+    _release_date_from_slug,
+    _ticker_from_question,
+)
 from src.modeling.beat_model import (
     BEAT_FEATURES,
     MIN_TRAINING_SAMPLES,
@@ -63,7 +68,8 @@ PROB_CLIP = (0.01, 0.99)  # for log loss
 
 
 def resolved_contracts() -> pd.DataFrame:
-    """[contract_id, ticker, release_date, outcome, yes_token, volume] for
+    """[contract_id, ticker, release_date, eps_basis, eps_threshold, outcome,
+    yes_token, volume] for
     resolved earnings markets with a parseable release date."""
     rows = []
     for m in ContractClient(use_fixtures=False).fetch_polymarket_earnings_markets(closed=True):
@@ -76,11 +82,14 @@ def resolved_contracts() -> pd.DataFrame:
         # Resolved markets settle at exactly 1/0; skip anything else (voided/disputed).
         if not release or sorted(outcome_prices) != [0.0, 1.0]:
             continue
+        basis, threshold = _eps_terms_from_slug(m.get("slug", ""))
         rows.append(
             {
                 "contract_id": str(m.get("id")),
                 "ticker": _ticker_from_question(m.get("question", "")),
                 "release_date": pd.Timestamp(release),
+                "eps_basis": basis,
+                "eps_threshold": threshold,
                 "outcome": int(outcome_prices[0] == 1.0),
                 "yes_token": yes_token,
                 "volume": float(m.get("volumeNum") or 0.0),

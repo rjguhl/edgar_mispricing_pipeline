@@ -27,6 +27,7 @@ env/
 # Data + models (don't commit large/private artifacts)
 data/raw/
 data/processed/
+data/orderbook/
 models/*.pkl
 *.parquet
 *.h5
