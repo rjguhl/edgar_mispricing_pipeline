@@ -21,6 +21,7 @@ contact email, and to stay under 10 requests per second.
 
 from __future__ import annotations
 
+import html as htmllib
 import json
 import logging
 import re
@@ -36,6 +37,17 @@ logger = logging.getLogger(__name__)
 
 EDGAR_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+# 10-Q/10-K filed within this many days after an earnings 8-K are treated
+# as the same event (see dedupe_earnings_events).
+EARNINGS_DEDUPE_WINDOW_DAYS = 14
+
+MAX_RETRIES = 5
+RETRY_BASE_DELAY_SECONDS = 2.0
+RETRYABLE_STATUS_CODES = {403, 429, 500, 502, 503, 504}
+
+EDGAR_FILING_INDEX_URL = (
+    "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_no_dash}/index.json"
+)
 EDGAR_ARCHIVE_URL = (
     "https://www.sec.gov/Archives/edgar/data/{cik}/{accession_no_dash}/{document}"
 )
@@ -61,8 +73,6 @@ class EdgarClient:
         )
         self._cik_cache: dict[str, int] | None = None
 
-        # Defer S3 client construction; only build it when we actually upload.
-        self._s3 = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -90,7 +100,6 @@ class EdgarClient:
                     transcript = self._download_transcript(filing)
                     if transcript:
                         results.append(transcript)
-                        self._upload_to_s3(transcript)
             except Exception as e:
                 logger.error("Failed to fetch transcripts for %s: %s", ticker, e)
 
@@ -165,12 +174,14 @@ class EdgarClient:
         """Download the filing document and strip HTML to plain text."""
         url = filing["filing_url"]
         try:
-            html = self._get_text(url)
+            if filing.get("form") == "8-K":
+                text = self._download_8k_exhibits(filing)
+            else:
+                text = _html_to_text(self._get_text(url))
         except Exception as e:
             logger.error("Failed to download %s: %s", url, e)
             return None
 
-        text = _html_to_text(html)
         if len(text) < 500:
             # Skip stub filings — likely cover pages with no real content.
             logger.info("Skipping short filing for %s (%d chars)", filing["ticker"], len(text))
@@ -180,6 +191,7 @@ class EdgarClient:
 
         return {
             "ticker": filing["ticker"],
+            "form": filing.get("form", ""),
             "filing_date": filing["filing_date"],
             "fiscal_quarter": fiscal_quarter,
             "fiscal_year": fiscal_year,
@@ -187,6 +199,44 @@ class EdgarClient:
             "filing_url": url,
             "loaded_at": datetime.utcnow().isoformat() + "Z",
         }
+
+    def _download_8k_exhibits(self, filing: dict) -> str:
+        """Return the text of an earnings 8-K's exhibits.
+
+        The 8-K primary document is just a cover page; the earnings press
+        release (and sometimes CFO commentary) lives in separate exhibit
+        files whose names vary by filer (msft-ex99_1.htm, q2fy27pr.htm,
+        exhibit991.htm, ...). Take every .htm in the filing except the
+        cover, index pages and XBRL viewer pages, 99.x exhibits first.
+        Falls back to the primary document if no exhibits are found.
+        """
+        accession_no_dash = filing["accession_no"].replace("-", "")
+        index = self._get_json(
+            EDGAR_FILING_INDEX_URL.format(
+                cik=filing["cik"], accession_no_dash=accession_no_dash
+            )
+        )
+        names = [item["name"] for item in index.get("directory", {}).get("item", [])]
+        exhibits = [
+            n
+            for n in names
+            if n.lower().endswith((".htm", ".html"))
+            and n != filing["primary_document"]
+            and "index" not in n.lower()
+            and not re.fullmatch(r"R\d+\.htm", n)
+        ]
+        exhibits.sort(key=lambda n: "99" not in n)
+
+        if not exhibits:
+            return _html_to_text(self._get_text(filing["filing_url"]))
+
+        parts = []
+        for name in exhibits:
+            exhibit_url = EDGAR_ARCHIVE_URL.format(
+                cik=filing["cik"], accession_no_dash=accession_no_dash, document=name
+            )
+            parts.append(_html_to_text(self._get_text(exhibit_url)))
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Fixtures path (mock-first dev mode)
@@ -233,42 +283,38 @@ class EdgarClient:
         return self._cik_cache.get(ticker.upper())
 
     def _get_json(self, url: str) -> dict:
-        time.sleep(REQUEST_INTERVAL_SECONDS)
-        resp = self.session.get(url, timeout=30)
-        resp.raise_for_status()
-        return resp.json()
+        return self._get(url).json()
 
     def _get_text(self, url: str) -> str:
-        time.sleep(REQUEST_INTERVAL_SECONDS)
-        resp = self.session.get(url, timeout=30)
-        resp.raise_for_status()
-        return resp.text
+        return self._get(url).text
 
-    def _upload_to_s3(self, transcript: dict) -> None:
-        """Persist raw transcript to S3. No-op if AWS not configured."""
-        if not Config.S3_BUCKET or not Config.AWS_ACCESS_KEY_ID:
-            return
-        if self._s3 is None:
-            import boto3  # imported lazily — keeps test/CI lightweight
+    def _get(self, url: str) -> requests.Response:
+        """GET with pacing and exponential-backoff retries.
 
-            self._s3 = boto3.client(
-                "s3",
-                aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY,
-                region_name=Config.AWS_DEFAULT_REGION,
+        SEC throttles bursts (403/429) and occasionally drops connections;
+        without retries one transient failure silently drops a whole
+        ticker's filings from the run.
+        """
+        delay = RETRY_BASE_DELAY_SECONDS
+        for attempt in range(MAX_RETRIES):
+            time.sleep(REQUEST_INTERVAL_SECONDS)
+            try:
+                resp = self.session.get(url, timeout=30)
+                if resp.status_code not in RETRYABLE_STATUS_CODES:
+                    resp.raise_for_status()
+                    return resp
+                reason = f"HTTP {resp.status_code}"
+            except (requests.ConnectionError, requests.Timeout) as e:
+                reason = type(e).__name__
+            if attempt == MAX_RETRIES - 1:
+                break
+            logger.warning(
+                "EDGAR request failed (%s), retry %d/%d in %.0fs: %s",
+                reason, attempt + 1, MAX_RETRIES - 1, delay, url,
             )
-
-        key = (
-            f"raw/edgar/{transcript['ticker']}/"
-            f"{transcript['filing_date']}.json"
-        )
-        self._s3.put_object(
-            Bucket=Config.S3_BUCKET,
-            Key=key,
-            Body=json.dumps(transcript).encode("utf-8"),
-            ContentType="application/json",
-        )
-
+            time.sleep(delay)
+            delay *= 2
+        raise requests.HTTPError(f"EDGAR request failed after {MAX_RETRIES} attempts ({reason}): {url}")
 
 # ----------------------------------------------------------------------
 # Module-level helpers (pure functions — easy to unit test)
@@ -276,6 +322,39 @@ class EdgarClient:
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WHITESPACE_RE = re.compile(r"\s+")
+
+
+def dedupe_earnings_events(
+    transcripts: list[dict], window_days: int = EARNINGS_DEDUPE_WINDOW_DAYS
+) -> list[dict]:
+    """Keep one filing per earnings event.
+
+    A company typically files its 8-K earnings press release and its
+    10-Q/10-K within days of each other; both would get labeled with
+    the same price reaction, double-counting the event. Keep the 8-K
+    (it's what the market reacts to) and drop any 10-Q/10-K filed within
+    `window_days` after an 8-K for the same ticker. A periodic report
+    with no nearby 8-K is kept as the event's only source.
+    """
+    def _date(t: dict) -> datetime:
+        return datetime.strptime(t["filing_date"], "%Y-%m-%d")
+
+    eightk_dates: dict[str, list[datetime]] = {}
+    for t in transcripts:
+        if t.get("form") == "8-K":
+            eightk_dates.setdefault(t["ticker"], []).append(_date(t))
+
+    kept = []
+    for t in transcripts:
+        if t.get("form") != "8-K":
+            d = _date(t)
+            if any(
+                timedelta(0) <= d - k <= timedelta(days=window_days)
+                for k in eightk_dates.get(t["ticker"], [])
+            ):
+                continue
+        kept.append(t)
+    return kept
 
 
 def _html_to_text(html: str) -> str:
@@ -286,9 +365,17 @@ def _html_to_text(html: str) -> str:
     typically clean enough for regex stripping to produce usable text for
     LLM extraction downstream.
     """
+    # Inline-XBRL filings embed a hidden <ix:header> block of tagging
+    # metadata before the visible document; drop it so it doesn't eat the
+    # extractor's character budget.
+    html = _IX_HEADER_RE.sub(" ", html)
     text = _TAG_RE.sub(" ", html)
+    text = htmllib.unescape(text)
     text = _WHITESPACE_RE.sub(" ", text)
     return text.strip()
+
+
+_IX_HEADER_RE = re.compile(r"<ix:header>.*?</ix:header>", re.IGNORECASE | re.DOTALL)
 
 
 _QUARTER_RE = re.compile(r"(?:fiscal\s+)?(?:Q([1-4])|first|second|third|fourth)\s+quarter", re.IGNORECASE)

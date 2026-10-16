@@ -1,7 +1,9 @@
 """Structured extraction from earnings call transcripts using Claude API."""
 
+import hashlib
 import json
 import logging
+from pathlib import Path
 
 import anthropic
 
@@ -26,13 +28,57 @@ Analyze the following transcript and return a JSON object with exactly these fie
 
 Return ONLY valid JSON. No explanation, no markdown."""
 
+# Enforced server-side via structured outputs, so the response is always
+# parseable JSON (no markdown fences, no missing fields).
+EXTRACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overall_sentiment": {"type": "string", "enum": ["bullish", "bearish", "neutral"]},
+        "sentiment_score": {"type": "number"},
+        "forward_guidance": {
+            "type": "string",
+            "enum": ["raised", "maintained", "lowered", "withdrawn", "not_mentioned"],
+        },
+        "management_tone": {
+            "type": "string",
+            "enum": ["confident", "cautious", "defensive", "evasive", "neutral"],
+        },
+        "key_themes": {"type": "array", "items": {"type": "string"}},
+        "revenue_surprise_indicator": {
+            "type": "string",
+            "enum": ["beat", "miss", "inline", "unclear"],
+        },
+        "analyst_sentiment": {
+            "type": "string",
+            "enum": ["positive", "negative", "mixed", "neutral"],
+        },
+        "risk_flags": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": [
+        "overall_sentiment",
+        "sentiment_score",
+        "forward_guidance",
+        "management_tone",
+        "key_themes",
+        "revenue_surprise_indicator",
+        "analyst_sentiment",
+        "risk_flags",
+    ],
+    "additionalProperties": False,
+}
+
+
+# Extractions are cached per (model, filing URL) so re-running training
+# never pays twice for the same filing.
+EXTRACTION_CACHE_DIR = Path("data/processed/extraction_cache")
+
 
 class TranscriptExtractor:
     """Extracts structured features from earnings transcripts via Claude API."""
 
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=Config.ANTHROPIC_API_KEY)
-        self.model = "claude-sonnet-4-20250514"
+        self.model = "claude-haiku-5-5"
 
     def extract(self, transcript_text: str, ticker: str = "") -> dict | None:
         """
@@ -54,9 +100,16 @@ class TranscriptExtractor:
                     f"Truncated {ticker} transcript to {max_chars} chars"
                 )
 
+            # The model thinks by default and thinking tokens count against
+            # max_tokens, so leave headroom; low effort keeps this simple
+            # classification task cheap.
             response = self.client.messages.create(
                 model=self.model,
-                max_tokens=1024,
+                max_tokens=4096,
+                output_config={
+                    "effort": "low",
+                    "format": {"type": "json_schema", "schema": EXTRACTION_SCHEMA},
+                },
                 messages=[
                     {
                         "role": "user",
@@ -69,7 +122,13 @@ class TranscriptExtractor:
                 ],
             )
 
-            raw_text = response.content[0].text.strip()
+            if response.stop_reason in ("max_tokens", "refusal"):
+                logger.error(f"Extraction for {ticker} stopped early: {response.stop_reason}")
+                return None
+
+            # The response may lead with a thinking block; the JSON is in
+            # the text block.
+            raw_text = next(b.text for b in response.content if b.type == "text")
             features = json.loads(raw_text)
 
             # Validate expected fields
@@ -99,7 +158,13 @@ class TranscriptExtractor:
             logger.error(f"Extraction failed for {ticker}: {e}")
             return None
 
-    def extract_batch(self, transcripts: list[dict]) -> list[dict]:
+    def _cache_path(self, filing_url: str) -> Path | None:
+        if not filing_url:
+            return None
+        key = hashlib.sha256(f"{self.model}|{filing_url}".encode()).hexdigest()[:24]
+        return EXTRACTION_CACHE_DIR / f"{key}.json"
+
+    def extract_batch(self, transcripts: list[dict], cached_only: bool = False) -> list[dict]:
         """
         Extract features from multiple transcripts.
 
@@ -110,16 +175,31 @@ class TranscriptExtractor:
             List of extracted feature dicts
         """
         results = []
+        cache_hits = 0
+        skipped_uncached = 0
         for t in transcripts:
-            features = self.extract(
-                transcript_text=t["transcript_text"],
-                ticker=t.get("ticker", "UNKNOWN"),
-            )
+            cache_path = self._cache_path(t.get("filing_url", ""))
+            if cache_path and cache_path.exists():
+                features = json.loads(cache_path.read_text())
+                cache_hits += 1
+            elif cached_only:
+                # Never call the API in this mode — skip uncached filings.
+                skipped_uncached += 1
+                continue
+            else:
+                features = self.extract(
+                    transcript_text=t["transcript_text"],
+                    ticker=t.get("ticker", "UNKNOWN"),
+                )
+                if features and cache_path:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(json.dumps(features))
             if features:
                 features["filing_date"] = t.get("filing_date", "")
                 results.append(features)
 
         logger.info(
-            f"Batch extraction complete: {len(results)}/{len(transcripts)} succeeded"
+            f"Batch extraction complete: {len(results)}/{len(transcripts)} succeeded "
+            f"({cache_hits} from cache, {skipped_uncached} uncached skipped)"
         )
         return results

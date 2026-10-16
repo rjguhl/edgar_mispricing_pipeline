@@ -1,16 +1,11 @@
-"""Score new earnings events with the trained MispricingModel.
+"""Feature encoding and scoring for filing-level (transcript) features.
 
-Two execution paths:
+`encode_features` turns Claude extractions + EPS surprise + FRED macro data
+into the model matrix used by src.modeling.train. `score` applies a saved
+model, or — in fixture mode, with no model — a transparent hand-weighted
+heuristic so the keyless demo still produces sensible probabilities.
 
-1. **Production**: load a serialized `MispricingModel` from disk and call
-   `predict_proba` over a feature matrix.
-2. **Demo / cold-start**: when no trained model is available, fall back to
-   a transparent heuristic combining transcript sentiment, forward-guidance
-   direction, and macro surprise. This keeps the dashboard meaningful before
-   we have enough historical labels to train.
-
-Inputs are aligned per (ticker, filing_date). Output is a DataFrame with
-columns: ticker, event_date, model_prob, source ("model" | "heuristic").
+Output columns: ticker, event_date, model_prob, source ("model" | "heuristic").
 """
 
 from __future__ import annotations
@@ -30,6 +25,23 @@ TRANSCRIPT_FEATURES = [
     "sentiment_score",
     "forward_guidance_score",
     "tone_score",
+    "revenue_surprise_score",
+    "analyst_sentiment_score",
+    "risk_flag_count",
+]
+# Quarter-over-quarter change vs. the same company's previous filing.
+# Press releases are almost uniformly upbeat, so the *shift* in tone is
+# more informative than its level. 0 when there's no prior event.
+CHANGE_FEATURES = [
+    "sentiment_change",
+    "forward_guidance_change",
+    "tone_change",
+]
+# Results vs. analyst consensus (src.processing.eps_surprise).
+EPS_FEATURES = [
+    "eps_surprise_pct",
+    "eps_beat",
+    "trailing_beat_rate",
 ]
 MACRO_FEATURES = [
     "cpi_pct_change",
@@ -37,12 +49,24 @@ MACRO_FEATURES = [
     "yield_curve_level",
     "consumer_sentiment_level",
 ]
-ALL_FEATURES = TRANSCRIPT_FEATURES + MACRO_FEATURES
+# P(beat EPS consensus next quarter) — compared against prediction-market
+# "beat quarterly earnings" prices. Trained by src.modeling.train.
+BEAT_MODEL_PATH = "models/beat_model.pkl"
+
+ALL_FEATURES = TRANSCRIPT_FEATURES + CHANGE_FEATURES + EPS_FEATURES + MACRO_FEATURES
 
 
-# Encodings used by both the heuristic and the eventual training pipeline.
+# Categorical extraction fields → numeric scores.
 GUIDANCE_MAP = {"raised": 1.0, "maintained": 0.0, "lowered": -1.0, "withdrawn": -0.5, "not_mentioned": 0.0}
 TONE_MAP = {"confident": 1.0, "neutral": 0.0, "cautious": -0.3, "defensive": -0.7, "evasive": -0.5}
+REVENUE_SURPRISE_MAP = {"beat": 1.0, "inline": 0.0, "miss": -1.0, "unclear": 0.0}
+ANALYST_SENTIMENT_MAP = {"positive": 1.0, "mixed": 0.0, "neutral": 0.0, "negative": -1.0}
+
+
+def _mapped(ev: pd.DataFrame, col: str, mapping: dict, default: str) -> pd.Series:
+    """Encode a categorical extraction column; missing column/values → default."""
+    raw = ev[col] if col in ev.columns else pd.Series(default, index=ev.index)
+    return raw.fillna(default).map(mapping).fillna(0.0)
 
 
 def encode_features(events: pd.DataFrame, macro: pd.DataFrame) -> pd.DataFrame:
@@ -60,11 +84,32 @@ def encode_features(events: pd.DataFrame, macro: pd.DataFrame) -> pd.DataFrame:
     """
     ev = events.copy()
     ev["event_date"] = pd.to_datetime(ev["filing_date"])
-    ev["forward_guidance_score"] = (
-        ev.get("forward_guidance", "not_mentioned").map(GUIDANCE_MAP).fillna(0.0)
+    ev["forward_guidance_score"] = _mapped(ev, "forward_guidance", GUIDANCE_MAP, "not_mentioned")
+    ev["tone_score"] = _mapped(ev, "management_tone", TONE_MAP, "neutral")
+    ev["sentiment_score"] = (
+        ev["sentiment_score"].astype(float) if "sentiment_score" in ev.columns else 0.0
     )
-    ev["tone_score"] = ev.get("management_tone", "neutral").map(TONE_MAP).fillna(0.0)
-    ev["sentiment_score"] = ev.get("sentiment_score", 0.0).astype(float)
+    ev["revenue_surprise_score"] = _mapped(ev, "revenue_surprise_indicator", REVENUE_SURPRISE_MAP, "unclear")
+    ev["analyst_sentiment_score"] = _mapped(ev, "analyst_sentiment", ANALYST_SENTIMENT_MAP, "neutral")
+    ev["risk_flag_count"] = (
+        ev["risk_flags"].apply(lambda f: float(len(f)) if isinstance(f, list) else 0.0)
+        if "risk_flags" in ev.columns
+        else 0.0
+    )
+
+    # Missing EPS match (or column absent) → 0 = "no surprise information".
+    for col in EPS_FEATURES:
+        ev[col] = ev[col].astype(float).fillna(0.0) if col in ev.columns else 0.0
+
+    # Change vs. the same ticker's previous event (by date). diff() leaves
+    # the first event per ticker as NaN → 0 ("no change known").
+    ordered = ev.sort_values("event_date")
+    for level, change in [
+        ("sentiment_score", "sentiment_change"),
+        ("forward_guidance_score", "forward_guidance_change"),
+        ("tone_score", "tone_change"),
+    ]:
+        ev[change] = ordered.groupby("ticker")[level].diff().reindex(ev.index).fillna(0.0)
 
     # As-of join: pick the most recent macro row at or before each event date.
     macro_sorted = macro.sort_index().copy()
@@ -105,7 +150,7 @@ def encode_features(events: pd.DataFrame, macro: pd.DataFrame) -> pd.DataFrame:
 
 def score(
     feature_df: pd.DataFrame,
-    model_path: str | Path = "models/mispricing_model.pkl",
+    model_path: str | Path | None = "models/mispricing_model.pkl",
 ) -> pd.DataFrame:
     """Return calibrated probability of earnings beat per row in `feature_df`.
 
@@ -114,8 +159,8 @@ def score(
     keys = feature_df[["ticker", "event_date"]].copy()
     X = feature_df[ALL_FEATURES]
 
-    path = Path(model_path)
-    if path.exists():
+    path = Path(model_path) if model_path is not None else None
+    if path is not None and path.exists():
         # Lazy-import so the heavy XGBoost / sklearn stack is only required
         # when an actual trained model is present on disk.
         from src.modeling.model import MispricingModel
@@ -136,11 +181,7 @@ def score(
 
 
 def _heuristic_proba(X: pd.DataFrame) -> np.ndarray:
-    """Transparent fallback: weighted sum of standardized signals → sigmoid.
-
-    Weights are hand-picked to be defensible *before* we have data; they
-    will be replaced once `MispricingModel.train` is run on labeled history.
-    """
+    """Fixture-mode fallback: hand-picked weighted sum of signals → sigmoid."""
     weights = {
         "sentiment_score": 0.8,
         "forward_guidance_score": 0.6,

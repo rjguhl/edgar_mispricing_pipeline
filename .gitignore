@@ -35,22 +35,8 @@ models/*.pkl
 logs/
 *.log
 
-# Airflow
-airflow.cfg
-airflow.db
-airflow-webserver.pid
-standalone_admin_password.txt
-
-# dbt
-dbt/target/
-dbt/dbt_packages/
-dbt/logs/
-dbt/.user.yml
-
 # Test/coverage
 .pytest_cache/
-.coverage
-htmlcov/
 .ruff_cache/
 
 # Streamlit

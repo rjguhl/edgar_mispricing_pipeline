@@ -17,13 +17,12 @@ class MispricingModel:
     """
     Calibrated earnings surprise classifier.
 
-    Trains XGBoost on transcript + macro features, applies Platt scaling
-    to produce well-calibrated probabilities, and compares against
-    market contract prices to flag mispricings.
+    XGBoost with Platt scaling for well-calibrated probabilities. Used for
+    both the price-reaction model (src.modeling.train) and the next-quarter
+    beat model (src.modeling.beat_model).
     """
 
-    def __init__(self, threshold: float = 0.10):
-        self.threshold = threshold
+    def __init__(self):
         self.base_model = XGBClassifier(
             n_estimators=200,
             max_depth=5,
@@ -71,43 +70,6 @@ class MispricingModel:
         if self.calibrated_model is None:
             raise ValueError("Model not trained. Call train() first.")
         return self.calibrated_model.predict_proba(X)[:, 1]
-
-    def flag_mispricings(
-        self, X: pd.DataFrame, market_probs: np.ndarray
-    ) -> pd.DataFrame:
-        """
-        Compare model probabilities to market prices and flag divergences.
-
-        Args:
-            X: Feature matrix for scoring
-            market_probs: Array of market contract prices (0-1)
-
-        Returns:
-            DataFrame with model_prob, market_prob, divergence, signal
-        """
-        model_probs = self.predict_proba(X)
-        divergence = model_probs - market_probs
-
-        signals = pd.DataFrame(
-            {
-                "model_prob": model_probs,
-                "market_prob": market_probs,
-                "divergence": divergence,
-                "abs_divergence": np.abs(divergence),
-                "signal": np.where(
-                    np.abs(divergence) > self.threshold,
-                    np.where(divergence > 0, "underpriced", "overpriced"),
-                    "no_signal",
-                ),
-            }
-        )
-
-        n_signals = (signals["signal"] != "no_signal").sum()
-        logger.info(
-            f"Flagged {n_signals} mispricings out of "
-            f"{len(signals)} contracts (threshold={self.threshold})"
-        )
-        return signals
 
     def save(self, path: str = "models/mispricing_model.pkl"):
         """Serialize trained model to disk."""

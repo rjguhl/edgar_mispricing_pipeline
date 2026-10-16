@@ -1,11 +1,11 @@
-"""End-to-end local pipeline runner.
-
-Lets you exercise the whole thing without Airflow:
+"""Live mispricing signals: beat model vs. open Polymarket earnings contracts.
 
     python -m src.pipeline
 
-In USE_FIXTURES mode (default) this completes in <1 second and produces
-data/processed/signals.{parquet,json} that the Streamlit dashboard reads.
+Live mode (USE_FIXTURES=false) scores every company with an upcoming
+"beat quarterly earnings" contract — no Claude calls, no API keys needed.
+Fixture mode (default) runs on bundled sample data in under a second.
+Both write data/processed/signals.{parquet,json} for the dashboard.
 """
 
 from __future__ import annotations
@@ -18,15 +18,15 @@ import pandas as pd
 
 from src.config import Config
 from src.ingestion.contract_client import ContractClient
-from src.ingestion.edgar_client import EdgarClient
-from src.modeling.scorer import GUIDANCE_MAP, TONE_MAP, encode_features, score
+from src.ingestion.edgar_client import EdgarClient, dedupe_earnings_events
+from src.modeling.scorer import encode_features, score
 from src.modeling.signal import flag_mispricings, write_signals
 from src.processing.macro_features import MacroFeatureBuilder
 
-# Heavy/optional deps (fredapi, anthropic) are imported lazily inside the
-# functions that need them so fixture-mode runs work without those installs.
-
 logger = logging.getLogger(__name__)
+
+
+FIXTURE_LOOKBACK_DAYS = 3650
 
 
 def run(
@@ -35,38 +35,39 @@ def run(
 ) -> pd.DataFrame:
     """Run the full pipeline and return the signals DataFrame."""
     use_fixtures = Config.USE_FIXTURES if use_fixtures is None else use_fixtures
-    tickers = tickers or _default_tickers()
 
-    # 1. Ingest
-    edgar = EdgarClient(use_fixtures=use_fixtures)
-    transcripts = edgar.fetch_transcripts(tickers, lookback_days=Config.LOOKBACK_DAYS)
-
-    macro_records = _load_fred(use_fixtures=use_fixtures)
-    contracts = _load_contracts(use_fixtures=use_fixtures)
-
-    if not transcripts:
-        logger.warning("No transcripts available; aborting pipeline run")
+    # 1. Ingest. Contracts first: in live mode with no explicit tickers, we
+    # score exactly the companies that currently have an open earnings
+    # contract whose release hasn't happened yet.
+    contracts = _upcoming_earnings_contracts(
+        _load_contracts(use_fixtures=use_fixtures, tickers=tickers),
+        use_fixtures=use_fixtures,
+    )
+    if not tickers:
+        tickers = (
+            sorted({c["ticker"] for c in contracts if c["ticker"]})
+            if not use_fixtures
+            else _default_tickers()
+        )
+    logger.info("Scoring %d tickers against %d upcoming earnings contracts", len(tickers), len(contracts))
+    if not tickers:
+        logger.warning("No upcoming earnings contracts to score; aborting pipeline run")
         return pd.DataFrame()
 
-    # 2. Extract structured features (Claude API in real mode, deterministic
-    # canned values in fixture mode so we don't burn tokens during dev).
+    # 2. Score. Live: next-quarter EPS beat probability from each company's
+    # earnings history (src.modeling.beat_model) — the same question the
+    # contracts price. Fixtures: the transcript-feature flow on bundled
+    # sample filings with the transparent heuristic (no API calls).
     if use_fixtures:
-        extracted = _stub_extract(transcripts)
+        scored = _score_fixture_transcripts(tickers)
+        if scored.empty:
+            return pd.DataFrame()
     else:
-        from src.processing.transcript_extractor import TranscriptExtractor
+        from src.modeling.beat_model import score_upcoming
 
-        extractor = TranscriptExtractor()
-        extracted = extractor.extract_batch(transcripts)
-    events = pd.DataFrame(extracted)
+        scored = score_upcoming(tickers)
 
-    # 3. Build macro features
-    macro_df = MacroFeatureBuilder().build_features(pd.DataFrame(macro_records))
-
-    # 4. Encode + score
-    feature_df = encode_features(events, macro_df)
-    scored = score(feature_df)
-
-    # 5. Compare against market and emit signals
+    # 3. Compare against market and emit signals
     contracts_df = _contracts_to_frame(contracts)
     signals = flag_mispricings(scored, contracts_df)
 
@@ -87,18 +88,52 @@ def _default_tickers() -> list[str]:
     return pd.read_csv(path)["ticker"].tolist()
 
 
-def _load_fred(use_fixtures: bool) -> list[dict]:
-    if use_fixtures:
-        path = Path(Config.FIXTURES_DIR) / "fred_indicators.json"
-        return json.loads(path.read_text()) if path.exists() else []
-    from src.ingestion.fred_client import FredClient
-
-    return FredClient().fetch_indicators(lookback_days=Config.LOOKBACK_DAYS)
+def _load_fred_fixture() -> list[dict]:
+    path = Path(Config.FIXTURES_DIR) / "fred_indicators.json"
+    return json.loads(path.read_text()) if path.exists() else []
 
 
-def _load_contracts(use_fixtures: bool) -> list[dict]:
+def _load_contracts(use_fixtures: bool, tickers: list[str]) -> list[dict]:
     client = ContractClient(use_fixtures=use_fixtures)
-    return client.fetch_all(event_types=["earnings"])
+    return client.fetch_all(tickers=tickers)
+
+
+def _score_fixture_transcripts(tickers: list[str]) -> pd.DataFrame:
+    """Fixture-mode scoring: bundled transcripts → canned extraction →
+    transcript features → heuristic probability."""
+    edgar = EdgarClient(use_fixtures=True)
+    # Bundled fixtures have fixed historical dates; don't let them age out
+    # of the lookback window.
+    transcripts = dedupe_earnings_events(
+        edgar.fetch_transcripts(tickers, lookback_days=FIXTURE_LOOKBACK_DAYS)
+    )
+    if not transcripts:
+        logger.warning("No transcripts available; aborting pipeline run")
+        return pd.DataFrame()
+    events = pd.DataFrame(_stub_extract(transcripts))
+    macro_df = MacroFeatureBuilder().build_features(pd.DataFrame(_load_fred_fixture()))
+    return score(encode_features(events, macro_df), model_path=None)
+
+
+def _upcoming_earnings_contracts(contracts: list[dict], use_fixtures: bool) -> list[dict]:
+    """Keep only EPS beat/miss contracts whose earnings release is still ahead.
+
+    Kalshi's Company-KPI contracts (headcount, deliveries, ...) ask a
+    different question than the beat model answers, so they're excluded
+    from signals. Contracts whose release date has passed are awaiting
+    settlement — the outcome is already public, so a "mispricing" there is
+    meaningless. (Fixture contracts carry historical dates, so the date
+    filter is skipped in fixture mode.)
+    """
+    today = pd.Timestamp.today().normalize()
+    kept = []
+    for c in contracts:
+        if c.get("event_type") != "earnings_beat":
+            continue
+        if not use_fixtures and pd.to_datetime(c.get("event_date") or None) < today:
+            continue
+        kept.append(c)
+    return kept
 
 
 def _contracts_to_frame(contracts: list[dict]) -> pd.DataFrame:
@@ -183,11 +218,6 @@ def _stub_extract(transcripts: list[dict]) -> list[dict]:
         feat["filing_date"] = t["filing_date"]
         out.append(feat)
     return out
-
-
-# Re-exported so dashboard layers can use the same encodings if they need
-# to display a row's heuristic contribution breakdown.
-__all__ = ["run", "GUIDANCE_MAP", "TONE_MAP"]
 
 
 if __name__ == "__main__":

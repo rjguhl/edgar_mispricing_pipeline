@@ -1,151 +1,85 @@
 # EDGAR Mispricing Pipeline
 
-An end-to-end data pipeline that extracts signals from SEC earnings call transcripts and FRED macroeconomic indicators, builds a calibrated probability model, and detects mispricings in prediction market contracts on Kalshi and Polymarket.
+Can public information predict quarterly earnings outcomes better than prediction markets do? This project extracts features from SEC EDGAR earnings filings with an LLM, combines them with EPS history, and compares the resulting forecasts against live and historical prices of Polymarket's "Will X beat quarterly earnings?" contracts.
 
 ![Python](https://img.shields.io/badge/python-3.11+-blue)
-![Airflow](https://img.shields.io/badge/orchestration-Apache%20Airflow-017CEE)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-## Overview
+## Results
 
-Prediction markets price discrete real-world events, but contracts are often thinly traded and driven by fragmented information. This pipeline explores whether structured analysis of authoritative financial text sources can reveal early indicators of market-relevant information before they are reflected in contract premiums.
+Full write-up with methodology, calibration tables, caveats and engineering notes: **[REPORT.md](REPORT.md)**.
 
-**Key idea:** Rather than treating model output as a standalone prediction, the system anchors it against a live market price — framing the task as *mispricing detection*.
+**1. LLM features vs. the price reaction to earnings** (`src/modeling/train.py`)
+270 earnings releases (20 large caps, 3 years). Claude (Haiku 5.5) extracts sentiment, guidance, tone, revenue-surprise and risk-flag features from each 8-K earnings press release.
 
-## Architecture
+| Features | Walk-forward ROC AUC (162 test events) |
+|---|---|
+| Text only | 0.50 |
+| EPS surprise only | 0.54 |
+| EPS surprise + text | 0.54 |
 
-```
-┌─────────────┐   ┌─────────────┐   ┌─────────────────┐
-│  SEC EDGAR  │   │  FRED API   │   │ Kalshi/Polymarket│
-│ Transcripts │   │ Macro Data  │   │ Contract Prices  │
-└──────┬──────┘   └──────┬──────┘   └────────┬─────────┘
-       │                 │                    │
-       ▼                 ▼                    ▼
-┌──────────────────────────────────────────────────────┐
-│              Apache Airflow (Nightly DAG)             │
-├──────────────────────────────────────────────────────┤
-│  Ingest  →  Transform (dbt)  →  Score  →  Dashboard  │
-└──────────────────────────────────────────────────────┘
-       │                 │
-       ▼                 ▼
-┌─────────────┐   ┌─────────────┐
-│  Amazon S3  │   │ PostgreSQL  │
-│  (Raw Data) │   │(Feature Store)│
-└─────────────┘   └──────┬──────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │  Claude API         │
-              │  Structured Extract │
-              └──────────┬──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │  XGBoost + Platt    │
-              │  Calibrated Probs   │
-              └──────────┬──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │ Streamlit Dashboard │
-              │ Signals & Backtest  │
-              └─────────────────────┘
-```
+Press-release sentiment carries no out-of-sample signal for the next-day abnormal return; EPS surprise vs. consensus is the only significant predictor (Spearman ρ = 0.16, p = 0.007).
 
-## Pipeline Stages
+**2. Next-quarter EPS beat model** (`src/modeling/beat_model.py`)
+Trained on 8,628 releases from the 406 companies Polymarket has listed earnings markets for. Chronological holdout (2,157 releases): Brier 0.169 vs. 0.185 for the base rate, ROC AUC 0.69.
 
-### 1. Ingestion
-- SEC EDGAR earnings call transcripts for S&P 500 constituents (rolling 90-day window)
-- FRED macroeconomic indicators (CPI, unemployment, yield curve, consumer sentiment)
-- Kalshi and Polymarket contract prices with timestamps
+**3. Model vs. Polymarket backtest** (`src/modeling/backtest.py`)
+1,111 resolved earnings contracts (Oct 2025 – Oct 2026). Market price = last trade before the release day; model = walk-forward, trained only on outcomes public before each contract's quarter.
 
-### 2. Transformation (dbt)
-- Raw data staged and transformed into analysis-ready tables
-- Schema contracts and data quality tests enforced
-- Feature store populated in PostgreSQL, keyed by ticker and event date
+| Forecast | Brier ↓ | Log loss ↓ | ROC AUC ↑ |
+|---|---|---|---|
+| **Polymarket** | **0.137** | **0.430** | **0.786** |
+| Beat model | 0.163 | 0.505 | 0.641 |
+| Base rate | 0.173 | 0.531 | 0.500 |
 
-### 3. Processing & Feature Engineering
-- **Claude API extraction**: Structured sentiment scores, financial theme tags, forward guidance indicators, and management tone from earnings transcripts
-- **Macro features**: Rate-of-change, surprise metrics (actual vs. consensus), rolling volatility
+The market is well calibrated and clearly beats a model built on EPS history alone; blending the model into the market price doesn't improve it. A naive strategy of trading on model–market disagreements of more than 10 points made +2.5¢ per $1 contract over 574 trades, but the 95% CI includes zero ([−0.5¢, +5.5¢]) and the figure ignores bid/ask spreads, which on these thin markets typically exceed the edge. One lead worth more data: the market slightly underprices beats in most price buckets, and the buy-YES side of the strategy averaged +5.8¢ (235 trades).
 
-### 4. Modeling
-- XGBoost classifier on historical earnings events
-- Platt scaling for probability calibration
-- Lead-lag analysis aligning feature spikes with contract price movements
-
-### 5. Signal & Output
-- Mispricing signal flagged when calibrated probability diverges from market price by configurable threshold
-- Streamlit dashboard: live signals, model vs. market probability, sentiment trends, pipeline health
-- Backtesting module: directional accuracy, precision/recall
-
-## Tech Stack
-
-| Layer | Tools |
-|-------|-------|
-| Ingestion | SEC EDGAR REST API, FRED API, Kalshi API, Polymarket API |
-| Orchestration | Apache Airflow |
-| Storage | Amazon S3 (raw), PostgreSQL (feature store) |
-| Transformation | dbt |
-| NLP & Features | Claude API (structured extraction), spaCy |
-| Modeling | XGBoost, LightGBM, scikit-learn (Platt scaling) |
-| Dashboard | Streamlit, matplotlib |
-| CI/CD | GitHub Actions |
-
-## Project Structure
+## How it works
 
 ```
-edgar-mispricing-pipeline/
-├── dags/                    # Airflow DAG definitions
-│   └── mispricing_dag.py
-├── dbt/                     # dbt project
-│   ├── models/
-│   │   ├── staging/         # Raw → cleaned
-│   │   └── features/        # Cleaned → feature store
-│   └── tests/               # Data quality tests
-├── src/
-│   ├── ingestion/           # API clients (EDGAR, FRED, Kalshi, Polymarket)
-│   ├── processing/          # Claude API extraction, macro feature engineering
-│   ├── modeling/            # XGBoost training, calibration, lead-lag
-│   └── dashboard/           # Streamlit app
-├── tests/                   # Unit and integration tests
-├── notebooks/               # Exploratory analysis
-├── docs/                    # Additional documentation
-├── .github/workflows/       # CI/CD
-├── requirements.txt
-├── .env.example
-└── README.md
+SEC EDGAR 8-K/10-Q ──► Claude extraction ──┐
+Yahoo EPS vs. consensus ───────────────────┼──► price-reaction model (train.py)
+FRED macro indicators ─────────────────────┘
+
+Yahoo EPS history (406 cos.) ──► next-quarter beat model (beat_model.py)
+                                          │
+Polymarket open contracts ────────────────┼──► live signals (pipeline.py) ──► Streamlit
+Polymarket resolved contracts + CLOB prices ─► backtest (backtest.py) ───────► Streamlit
 ```
 
-## Setup
+- **Ingestion** (`src/ingestion/`): EDGAR filings (8-K earnings exhibits, 10-Q/10-K) with rate-limit pacing and retries; FRED indicators; Kalshi and Polymarket contracts via their public APIs (no keys needed).
+- **Processing** (`src/processing/`): Claude structured extraction with an enforced JSON schema and an on-disk cache (a filing is never paid for twice); market-adjusted post-earnings returns; EPS surprise matching.
+- **Modeling** (`src/modeling/`): XGBoost with Platt-scaled probabilities, chronological holdouts, walk-forward backtesting.
+- **Signals**: each open contract is matched to the company's latest report before the release date; already-released contracts and Kalshi's KPI contracts (which ask a different question) are excluded.
+
+## Usage
 
 ```bash
-# Clone
-git clone https://github.com/YOUR_USERNAME/edgar-mispricing-pipeline.git
-cd edgar-mispricing-pipeline
-
-# Environment
-python -m venv venv
-source venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env              # ANTHROPIC_API_KEY, FRED_API_KEY, EDGAR_USER_AGENT; USE_FIXTURES=false for live data
 
-# Configure
-cp .env.example .env
-# Add your API keys to .env
+python -m src.pipeline            # live signals vs. open Polymarket contracts (no Claude calls)
+python -m src.modeling.beat_model # retrain the beat model (free: Yahoo data only)
+python -m src.modeling.backtest   # model vs. market on resolved contracts (free)
+python -m src.modeling.train --tickers AAPL MSFT ... --lookback-days 1095 --cached-only
+                                  # price-reaction model; --cached-only never calls Claude
+streamlit run src/dashboard/app.py
+pytest -q
 ```
 
-## Configuration
+With `USE_FIXTURES=true` (the default) the pipeline and dashboard run on bundled sample data with no API keys.
 
-Copy `.env.example` to `.env` and fill in your credentials:
+## Project structure
 
 ```
-ANTHROPIC_API_KEY=your_key_here
-FRED_API_KEY=your_key_here
-KALSHI_API_KEY=your_key_here
-POLYMARKET_API_KEY=your_key_here
-AWS_ACCESS_KEY_ID=your_key_here
-AWS_SECRET_ACCESS_KEY=your_key_here
-S3_BUCKET=your_bucket_name
-DATABASE_URL=postgresql://user:pass@localhost:5432/mispricing
+src/
+├── ingestion/     edgar_client.py, fred_client.py, contract_client.py
+├── processing/    transcript_extractor.py, price_labels.py, eps_surprise.py, macro_features.py
+├── modeling/      train.py, beat_model.py, backtest.py, scorer.py, signal.py, model.py
+├── dashboard/     app.py
+└── pipeline.py
+tests/             unit tests (run in CI on every push)
+data/fixtures/     sample data for keyless runs
 ```
 
 ## License

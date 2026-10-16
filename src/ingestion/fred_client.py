@@ -3,7 +3,6 @@
 import logging
 from datetime import datetime, timedelta
 
-import boto3
 from fredapi import Fred
 
 from src.config import Config
@@ -26,12 +25,7 @@ class FredClient:
 
     def __init__(self):
         self.fred = Fred(api_key=Config.FRED_API_KEY)
-        self.s3 = boto3.client(
-            "s3",
-            aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY,
-            region_name=Config.AWS_DEFAULT_REGION,
-        )
+        # and only if AWS is actually configured (mirrors EdgarClient/ContractClient).
 
     def fetch_indicators(self, lookback_days: int = 90) -> list[dict]:
         """
@@ -70,7 +64,6 @@ class FredClient:
             except Exception as e:
                 logger.error(f"Failed to fetch {indicator_id}: {e}")
 
-        self._upload_to_s3(results)
         return results
 
     def _get_units(self, indicator_id: str) -> str:
@@ -84,14 +77,3 @@ class FredClient:
             "INDPRO": "index",
         }
         return units_map.get(indicator_id, "unknown")
-
-    def _upload_to_s3(self, records: list[dict]):
-        """Persist raw FRED data to S3."""
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        key = f"raw/fred/{date_str}/indicators.json"
-        self.s3.put_object(
-            Bucket=Config.S3_BUCKET,
-            Key=key,
-            Body=str(records),
-            ContentType="application/json",
-        )

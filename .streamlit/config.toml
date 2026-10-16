@@ -1,5 +1,4 @@
-# Streamlit theme — dark, plotly-friendly. Matches the signal-card CSS in
-# src/dashboard/app.py.
+# Streamlit theme — dark, plotly-friendly.
 
 [theme]
 base = "dark"

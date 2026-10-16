@@ -4,11 +4,9 @@ Run locally:
     streamlit run src/dashboard/app.py
 
 Pages:
-    - Signals       : current mispricings flagged by the model
-    - Macro         : engineered FRED feature time series
-    - Transcripts   : per-ticker structured extraction view
-    - Backtest      : naive directional accuracy over the signals frame
-    - Pipeline      : trigger a fresh end-to-end run from the UI
+    - Signals  : beat model vs. open Polymarket earnings contracts
+    - Backtest : model vs. market on resolved contracts (src.modeling.backtest)
+    - Pipeline : trigger a fresh signals run from the UI
 """
 
 from __future__ import annotations
@@ -21,22 +19,26 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from src.config import Config
-from src.pipeline import run as run_pipeline
-from src.processing.macro_features import MacroFeatureBuilder
-
 # Ensure the project root is importable when launched via
 # `streamlit run src/dashboard/app.py` (Streamlit doesn't add CWD to sys.path).
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from src.config import Config  # noqa: E402
+from src.modeling.backtest import (  # noqa: E402
+    RESULTS_PATH,
+    calibration_table,
+    score_forecasts,
+    simulate_trades,
+)
+from src.pipeline import run as run_pipeline  # noqa: E402
+
 SIGNALS_PATH = Path("data/processed/signals.json")
-FIXTURES_DIR = Path(Config.FIXTURES_DIR)
 
 
 # ----------------------------------------------------------------------
-# Page config + global styling
+# Page config
 # ----------------------------------------------------------------------
 
 st.set_page_config(
@@ -45,20 +47,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-st.markdown(
-    """
-    <style>
-    .signal-card {padding: 1rem; border-radius: 8px; margin-bottom: 0.5rem;}
-    .signal-underpriced {background: #1e3a2e; border-left: 4px solid #38b676;}
-    .signal-overpriced  {background: #3a1e1e; border-left: 4px solid #ef5350;}
-    .signal-none        {background: #2c2c2c; border-left: 4px solid #6b6b6b;}
-    .metric-label {color: #aaa; font-size: 0.8rem;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
 
 # ----------------------------------------------------------------------
 # Data loaders (cached)
@@ -77,19 +65,8 @@ def load_signals() -> pd.DataFrame:
 
 
 @st.cache_data(ttl=60)
-def load_fred_fixture() -> pd.DataFrame:
-    path = FIXTURES_DIR / "fred_indicators.json"
-    if not path.exists():
-        return pd.DataFrame()
-    return pd.DataFrame(json.loads(path.read_text()))
-
-
-@st.cache_data(ttl=60)
-def load_transcripts_fixture() -> pd.DataFrame:
-    path = FIXTURES_DIR / "edgar_transcripts.json"
-    if not path.exists():
-        return pd.DataFrame()
-    return pd.DataFrame(json.loads(path.read_text()))
+def load_backtest() -> pd.DataFrame:
+    return pd.read_parquet(RESULTS_PATH) if RESULTS_PATH.exists() else pd.DataFrame()
 
 
 # ----------------------------------------------------------------------
@@ -101,7 +78,7 @@ st.sidebar.caption("Calibrated probabilities vs. market prices")
 
 page = st.sidebar.radio(
     "Page",
-    ["Signals", "Macro", "Transcripts", "Backtest", "Pipeline"],
+    ["Signals", "Backtest", "Pipeline"],
     label_visibility="collapsed",
 )
 
@@ -201,6 +178,7 @@ def page_signals() -> None:
             [
                 "ticker",
                 "event_date",
+                "filing_date",
                 "platform",
                 "model_prob",
                 "market_prob",
@@ -214,128 +192,67 @@ def page_signals() -> None:
     )
 
 
-def page_macro() -> None:
-    st.title("Macro features")
-    st.caption("Engineered FRED indicator series feeding the model.")
-
-    raw = load_fred_fixture()
-    if raw.empty:
-        st.warning("No FRED data available.")
-        return
-
-    feats = MacroFeatureBuilder().build_features(raw)
-    if feats.empty:
-        st.warning("Macro feature build returned empty.")
-        return
-
-    indicator = st.selectbox(
-        "Indicator",
-        options=sorted(raw["indicator_id"].unique()),
-        format_func=lambda x: f"{x} — {raw[raw.indicator_id==x]['indicator_name'].iloc[0]}",
-    )
-    prefix = indicator.lower()
-
-    cols = [c for c in feats.columns if c.startswith(prefix)]
-    if not cols:
-        st.warning(f"No engineered features found for {indicator}.")
-        return
-
-    plot_df = feats[cols].reset_index().melt(id_vars="observation_date", var_name="feature")
-    fig = px.line(
-        plot_df,
-        x="observation_date",
-        y="value",
-        color="feature",
-        title=f"{indicator} engineered features",
-    )
-    fig.update_layout(height=480, xaxis_title="Date", yaxis_title="Value")
-    st.plotly_chart(fig, use_container_width=True)
-
-    with st.expander("Raw feature table"):
-        st.dataframe(feats[cols], use_container_width=True)
-
-
-def page_transcripts() -> None:
-    st.title("Transcripts")
-    st.caption("EDGAR 8-K Item 2.02 / 10-Q content + (planned) Claude extraction output.")
-
-    df = load_transcripts_fixture()
-    if df.empty:
-        st.warning("No transcripts available.")
-        return
-
-    ticker = st.selectbox("Ticker", options=sorted(df["ticker"].unique()))
-    rows = df[df["ticker"] == ticker].sort_values("filing_date", ascending=False)
-
-    for _, row in rows.iterrows():
-        with st.expander(
-            f"{row['ticker']} — {row['filing_date']} ({row.get('fiscal_quarter', '')} {row.get('fiscal_year', '')})"
-        ):
-            st.write(f"**Filing URL:** {row.get('filing_url', 'n/a')}")
-            st.write(f"**Length:** {len(row['transcript_text'])} characters")
-            st.text_area(
-                "Transcript",
-                value=row["transcript_text"],
-                height=300,
-                key=f"tx-{row['ticker']}-{row['filing_date']}",
-            )
-
-
 def page_backtest() -> None:
     st.title("Backtest")
     st.caption(
-        "Naive accuracy: did the side our signal favored (high model_prob = beat) "
-        "actually realize? Real labels will replace the toy ones below in Phase 3."
+        "Resolved Polymarket \"beat quarterly earnings\" contracts: the market's "
+        "last price before the release vs. the beat model's walk-forward "
+        "probability, scored against how each contract actually resolved."
     )
 
-    signals = load_signals()
-    if signals.empty:
-        st.info("Run the pipeline first.")
+    bt = load_backtest()
+    if bt.empty:
+        st.info("No backtest results yet. Run `python -m src.modeling.backtest`.")
         return
 
-    # Toy label: use the heuristic-strong signals as proxies for realized outcomes.
-    # When real earnings outcomes are joined in, this section will report
-    # precision/recall against actual beat/miss labels.
-    s = signals.copy()
-    s["predicted_beat"] = s["model_prob"] > 0.5
-    s["market_beat"] = s["market_prob"] > 0.5
-    s["agree"] = s["predicted_beat"] == s["market_beat"]
-
     c1, c2, c3 = st.columns(3)
-    c1.metric("Rows", len(s))
-    c2.metric("Model–market agreement", f"{s['agree'].mean():.0%}")
-    c3.metric("Avg signal size", f"{s['abs_divergence'].mean():.3f}")
+    c1.metric("Contracts", len(bt))
+    c2.metric("Period", f"{bt['release_date'].min():%b %Y} – {bt['release_date'].max():%b %Y}")
+    c3.metric("Actual beat rate", f"{bt['outcome'].mean():.0%}")
 
-    st.subheader("Divergence distribution")
-    fig = px.histogram(
-        s, x="divergence", color="signal", nbins=20,
-        color_discrete_map={
-            "underpriced": "#38b676", "overpriced": "#ef5350", "no_signal": "#888",
-        },
+    st.subheader("Forecast accuracy (lower Brier / log loss is better)")
+    st.dataframe(score_forecasts(bt).round(4), use_container_width=True, hide_index=True)
+
+    st.subheader("Calibration")
+    left, right = st.columns(2)
+    left.write("**Market**")
+    left.dataframe(calibration_table(bt, "market_prob"), use_container_width=True)
+    right.write("**Model**")
+    right.dataframe(calibration_table(bt, "model_prob"), use_container_width=True)
+
+    st.subheader("Trading simulation")
+    st.caption("Buy the side the model favors when it disagrees with the market by more than the threshold. No fees or spread.")
+    st.dataframe(
+        pd.DataFrame([simulate_trades(bt, t) for t in (0.10, 0.20, 0.30)]).round(3),
+        use_container_width=True,
+        hide_index=True,
     )
-    fig.update_layout(height=380)
+
+    fig = px.scatter(
+        bt, x="market_prob", y="model_prob", color=bt["outcome"].map({1: "beat", 0: "miss"}),
+        hover_data=["ticker", "release_date"], opacity=0.6,
+        color_discrete_map={"beat": "#38b676", "miss": "#ef5350"},
+        title="Model vs market probability, colored by actual outcome",
+    )
+    fig.add_shape(type="line", x0=0, y0=0, x1=1, y1=1, line={"dash": "dash", "color": "#666"})
+    fig.update_layout(xaxis_range=[0, 1], yaxis_range=[0, 1], height=500)
     st.plotly_chart(fig, use_container_width=True)
-
-    st.warning(
-        "**Phase-3 note:** real earnings actuals are not yet joined in. "
-        "These metrics are illustrative scaffolding only."
-    )
 
 
 def page_pipeline() -> None:
     st.title("Pipeline")
-    st.caption("Trigger an end-to-end pipeline run from the browser.")
+    st.caption("Trigger a fresh signals run from the browser.")
 
     st.write(
-        "This calls `src.pipeline.run()` which ingests transcripts + FRED + "
-        "contracts, builds features, scores them, and writes "
-        "`data/processed/signals.json`."
+        "This calls `src.pipeline.run()`, which fetches open Polymarket earnings "
+        "contracts, scores each company's next-quarter beat probability, and "
+        "writes `data/processed/signals.json`."
     )
 
     if Config.USE_FIXTURES:
         st.success("USE_FIXTURES=true — runs locally with bundled sample data, no API calls.")
     else:
-        st.warning("USE_FIXTURES=false — this will hit live SEC / FRED / Kalshi / Polymarket endpoints.")
+        st.warning("USE_FIXTURES=false — this will hit live Polymarket / Kalshi / Yahoo Finance endpoints (no Claude calls).")
 
     if st.button("Run pipeline now", type="primary"):
         with st.spinner("Running pipeline…"):
@@ -354,8 +271,6 @@ def page_pipeline() -> None:
 
 PAGES = {
     "Signals": page_signals,
-    "Macro": page_macro,
-    "Transcripts": page_transcripts,
     "Backtest": page_backtest,
     "Pipeline": page_pipeline,
 }

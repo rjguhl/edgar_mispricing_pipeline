@@ -13,6 +13,10 @@ from src.config import Config
 
 logger = logging.getLogger(__name__)
 
+# A filing older than ~1 quarter before the release is stale — it's from
+# two earnings cycles back and shouldn't be matched to this contract.
+MAX_FILING_AGE_DAYS = 120
+
 
 def flag_mispricings(
     scored: pd.DataFrame,
@@ -28,6 +32,9 @@ def flag_mispricings(
         threshold: |model_prob - market_prob| > threshold flags a signal.
             Defaults to Config.MISPRICING_THRESHOLD.
 
+    Each contract (event_date = expected earnings release) is matched to
+    the ticker's latest scored filing on or before that date.
+
     Returns a DataFrame keyed by (ticker, event_date, platform) with
     divergence and signal columns. Multiple platforms per event produce
     multiple rows — useful for cross-venue arb visualization in the dashboard.
@@ -41,6 +48,7 @@ def flag_mispricings(
             columns=[
                 "ticker",
                 "event_date",
+                "filing_date",
                 "platform",
                 "model_prob",
                 "market_prob",
@@ -51,12 +59,23 @@ def flag_mispricings(
             ]
         )
 
-    s = scored.copy()
+    # Pair each contract with the company's most recent filing on or before
+    # the contract's earnings release date (within MAX_FILING_AGE_DAYS) —
+    # the latest information available when the contract is priced.
+    s = scored.rename(columns={"event_date": "filing_date"}).copy()
     c = contracts.copy()
-    s["event_date"] = pd.to_datetime(s["event_date"])
+    s["filing_date"] = pd.to_datetime(s["filing_date"])
     c["event_date"] = pd.to_datetime(c["event_date"])
 
-    merged = s.merge(c, on=["ticker", "event_date"], how="inner")
+    merged = pd.merge_asof(
+        c.sort_values("event_date"),
+        s.sort_values("filing_date"),
+        left_on="event_date",
+        right_on="filing_date",
+        by="ticker",
+        direction="backward",
+        tolerance=pd.Timedelta(days=MAX_FILING_AGE_DAYS),
+    ).dropna(subset=["model_prob"])
 
     merged["market_prob"] = merged["market_probability"].astype(float)
     merged["divergence"] = merged["model_prob"] - merged["market_prob"]
@@ -70,6 +89,7 @@ def flag_mispricings(
     out_cols = [
         "ticker",
         "event_date",
+        "filing_date",
         "platform",
         "model_prob",
         "market_prob",
@@ -105,7 +125,9 @@ def write_signals(
     out.parent.mkdir(parents=True, exist_ok=True)
 
     df = signals.copy()
-    df["event_date"] = pd.to_datetime(df["event_date"]).dt.strftime("%Y-%m-%d")
+    for col in ("event_date", "filing_date"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col]).dt.strftime("%Y-%m-%d")
 
     try:
         df.to_parquet(out, index=False)

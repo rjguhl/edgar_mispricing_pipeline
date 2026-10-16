@@ -1,291 +1,287 @@
-"""Prediction-market contract price ingestion (Kalshi + Polymarket).
+"""Prediction-market contract prices (Kalshi + Polymarket).
 
-Design notes
-------------
-- Kalshi public market metadata (`/trade-api/v2/markets`) does not require
-  authentication. A logged-in API key is only needed for trading or for
-  reading account-private data. We use the public endpoint here.
-- Polymarket exposes two relevant APIs:
-    * Gamma (`gamma-api.polymarket.com`) for market metadata + outcome prices
-    * CLOB (`clob.polymarket.com`) for live order-book / trade prices
-  Gamma is sufficient for our snapshot use case and avoids managing an
-  Ethereum wallet for the CLOB API.
-- We keep the original normalized schema from the scaffold so dbt's
-  `stg_contract_prices` model and `assert_valid_market_probability` test
-  continue to work unchanged.
+Both platforms' market data endpoints are public — no API keys needed.
+
+- Polymarket lists per-company "Will X (TICK) beat quarterly earnings?"
+  markets under the `earnings` tag on its Gamma API. These are what the
+  beat model is compared against.
+- Kalshi has no EPS beat/miss markets; its closest single-stock contracts
+  are "Company KPI" markets (headcount, deliveries, ...). They're collected
+  for reference but excluded from signals, since they ask a different
+  question than the model answers.
+
+Every contract is returned in one common schema:
+    contract_id, platform, ticker, event_type, event_date, price, volume, snapshot_ts
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from datetime import datetime
 from pathlib import Path
 
 import requests
-import re
 
 from src.config import Config
 
 logger = logging.getLogger(__name__)
 
 KALSHI_MARKETS_URL = "https://api.elections.kalshi.com/trade-api/v2/markets"
-POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com/markets"
+POLYMARKET_EVENTS_URL = "https://gamma-api.polymarket.com/events"
+# Per-company "Will X (TICK) beat quarterly earnings?" markets are tagged
+# `earnings` on Gamma (verified live 2026-10-15).
+POLYMARKET_EARNINGS_TAG = "earnings"
+POLYMARKET_PAGE_SIZE = 100
+POLYMARKET_MAX_PAGES = 50  # 100 events/page; ~1.4k resolved earnings events today
+
+# Kalshi's public markets endpoint rate-limits aggressively; pace requests
+# and retry with backoff on 429 rather than hammering it.
+KALSHI_REQUEST_INTERVAL_SECONDS = 0.5
+KALSHI_MAX_RETRIES = 3
+
+# Kalshi "Company KPI" series per stock ticker (verified live 2026-10-09).
+# Series tickers aren't derivable from the stock ticker by a fixed rule
+# (KXGOOGA covers GOOGL; KXAAPLA's trailing "A" isn't part of the ticker).
+KNOWN_KPI_SERIES: dict[str, list[str]] = {
+    "AAPL": ["KXAAPLA"],
+    "GOOGL": ["KXGOOGA"],
+    "NVDA": ["KXNVDAA"],
+    "TSLA": ["KXTSLA"],
+}
 
 
 class ContractClient:
-    """Fetches contract prices from Kalshi and Polymarket APIs."""
+    """Fetches contract prices from Kalshi and Polymarket."""
 
     def __init__(self, use_fixtures: bool | None = None):
-        self.use_fixtures = (
-            Config.USE_FIXTURES if use_fixtures is None else use_fixtures
-        )
+        self.use_fixtures = Config.USE_FIXTURES if use_fixtures is None else use_fixtures
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": Config.EDGAR_USER_AGENT})
-        self._s3 = None
 
-    # ------------------------------------------------------------------
-    # Public entry points
-    # ------------------------------------------------------------------
-
-    def fetch_kalshi_contracts(
-        self, event_types: list[str] | None = None
-    ) -> list[dict]:
-        """Fetch active contract prices from Kalshi.
-
-        `event_types` is a list of substrings to match against the Kalshi
-        market `event_ticker` (e.g., "EARNINGS", "CPI"). None = no filter.
-        """
-        if self.use_fixtures:
-            return self._fixture_subset("kalshi")
-
-        params = {"status": "open", "limit": 200}
-        all_markets: list[dict] = []
-        cursor: str | None = None
-
-        # Kalshi paginates with a cursor; cap at a sensible number of pages.
-        for _ in range(20):
-            if cursor:
-                params["cursor"] = cursor
-            resp = self.session.get(KALSHI_MARKETS_URL, params=params, timeout=30)
-            resp.raise_for_status()
-            payload = resp.json()
-            all_markets.extend(payload.get("markets", []))
-            cursor = payload.get("cursor")
-            if not cursor:
-                break
-
-        if event_types:
-            wanted = [t.upper() for t in event_types]
-            all_markets = [
-                m
-                for m in all_markets
-                if any(w in (m.get("event_ticker") or "").upper() for w in wanted)
-            ]
-
-        logger.info("Fetched %d Kalshi markets", len(all_markets))
-        return [_kalshi_to_common(m) for m in all_markets]
-
-    def fetch_polymarket_contracts(
-        self, event_types: list[str] | None = None
-    ) -> list[dict]:
-        """Fetch active contract prices from Polymarket via the Gamma API."""
-        if self.use_fixtures:
-            return self._fixture_subset("polymarket")
-
-        params = {"active": "true", "closed": "false", "limit": 200}
-        resp = self.session.get(POLYMARKET_GAMMA_URL, params=params, timeout=30)
-        resp.raise_for_status()
-        markets = resp.json() or []
-
-        if event_types:
-            wanted = [t.lower() for t in event_types]
-            markets = [
-                m
-                for m in markets
-                if any(
-                    w in (m.get("category", "") or "").lower()
-                    or w in (m.get("question", "") or "").lower()
-                    for w in wanted
-                )
-            ]
-
-        logger.info("Fetched %d Polymarket markets", len(markets))
-        return [_polymarket_to_common(m) for m in markets if m]
-
-    def fetch_all(self, event_types: list[str] | None = None) -> list[dict]:
-        """Fetch from all platforms, normalize, and persist."""
+    def fetch_all(self, tickers: list[str] | None = None) -> list[dict]:
+        """Contract snapshots from both platforms in the common schema."""
         results: list[dict] = []
-
-        try:
-            kalshi = self.fetch_kalshi_contracts(event_types)
-            results.extend(self._normalize(kalshi, platform="kalshi"))
-        except Exception as e:
-            logger.error("Kalshi fetch failed: %s", e)
-
-        try:
-            poly = self.fetch_polymarket_contracts(event_types)
-            results.extend(self._normalize(poly, platform="polymarket"))
-        except Exception as e:
-            logger.error("Polymarket fetch failed: %s", e)
-
-        self._upload_to_s3(results)
+        for name, fetch in (
+            ("Kalshi", self.fetch_kalshi_contracts),
+            ("Polymarket", self.fetch_polymarket_contracts),
+        ):
+            try:
+                results.extend(fetch(tickers))
+            except Exception as e:
+                logger.error("%s fetch failed: %s", name, e)
         logger.info("Fetched %d contract snapshots", len(results))
         return results
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Kalshi
     # ------------------------------------------------------------------
 
-    def _normalize(self, contracts: list[dict], platform: str) -> list[dict]:
-        """Coerce platform-native dicts into the common feature-store schema."""
-        snapshot_ts = datetime.utcnow().isoformat() + "Z"
-        normalized: list[dict] = []
-        for c in contracts:
-            normalized.append(
-                {
-                    "contract_id": c.get("contract_id") or c.get("id", ""),
-                    "platform": c.get("platform", platform),
-                    "ticker": c.get("ticker", ""),
-                    "event_type": c.get("event_type", ""),
-                    "event_date": c.get("event_date", ""),
-                    "price": float(c.get("price", 0.0) or 0.0),
-                    "volume": int(c.get("volume", 0) or 0),
-                    "snapshot_ts": c.get("snapshot_ts") or snapshot_ts,
-                }
-            )
-        return normalized
+    def fetch_kalshi_contracts(self, tickers: list[str] | None = None) -> list[dict]:
+        """Open Company-KPI contracts for `tickers` (default: every ticker
+        in KNOWN_KPI_SERIES)."""
+        if self.use_fixtures:
+            return self._fixture_subset("kalshi")
+
+        wanted = [t.upper() for t in tickers] if tickers else list(KNOWN_KPI_SERIES)
+        contracts: list[dict] = []
+        for ticker in wanted:
+            for series_ticker in KNOWN_KPI_SERIES.get(ticker, []):
+                time.sleep(KALSHI_REQUEST_INTERVAL_SECONDS)
+                payload = self._get_kalshi_page(
+                    {"series_ticker": series_ticker, "status": "open", "limit": 200}
+                )
+                contracts.extend(_kalshi_to_common(m, ticker) for m in payload.get("markets", []))
+        logger.info("Fetched %d Kalshi markets", len(contracts))
+        return contracts
+
+    def _get_kalshi_page(self, params: dict) -> dict:
+        """GET one page of Kalshi markets, retrying with backoff on 429."""
+        delay = KALSHI_REQUEST_INTERVAL_SECONDS
+        for attempt in range(KALSHI_MAX_RETRIES):
+            resp = self.session.get(KALSHI_MARKETS_URL, params=params, timeout=30)
+            if resp.status_code == 429 and attempt < KALSHI_MAX_RETRIES - 1:
+                logger.warning(
+                    "Kalshi rate-limited (attempt %d/%d); backing off %.1fs",
+                    attempt + 1, KALSHI_MAX_RETRIES, delay,
+                )
+                time.sleep(delay)
+                delay *= 2
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        return {}
+
+    # ------------------------------------------------------------------
+    # Polymarket
+    # ------------------------------------------------------------------
+
+    def fetch_polymarket_contracts(self, tickers: list[str] | None = None) -> list[dict]:
+        """Open "Will X beat quarterly earnings?" markets, optionally limited
+        to `tickers`."""
+        if self.use_fixtures:
+            return self._fixture_subset("polymarket")
+
+        records = [_polymarket_to_common(m) for m in self.fetch_polymarket_earnings_markets(closed=False)]
+        if tickers:
+            wanted = {t.upper() for t in tickers}
+            records = [r for r in records if r["ticker"] in wanted]
+        logger.info("Fetched %d Polymarket earnings markets", len(records))
+        return records
+
+    def fetch_polymarket_earnings_markets(self, closed: bool) -> list[dict]:
+        """Raw Gamma market dicts for every earnings market, open
+        (closed=False) or resolved (closed=True)."""
+        markets: list[dict] = []
+        for page in range(POLYMARKET_MAX_PAGES):
+            params = {
+                "tag_slug": POLYMARKET_EARNINGS_TAG,
+                "closed": "true" if closed else "false",
+                "limit": POLYMARKET_PAGE_SIZE,
+                "offset": page * POLYMARKET_PAGE_SIZE,
+            }
+            resp = self.session.get(POLYMARKET_EVENTS_URL, params=params, timeout=30)
+            resp.raise_for_status()
+            events = resp.json() or []
+            for event in events:
+                markets.extend(
+                    m for m in event.get("markets") or []
+                    if "earnings" in (m.get("question") or "").lower()
+                )
+            if len(events) < POLYMARKET_PAGE_SIZE:
+                break
+        return markets
+
+    def fetch_polymarket_earnings_tickers(self) -> list[str]:
+        """Every ticker Polymarket has listed an earnings market for (open or
+        resolved) — the beat model's training universe, so it learns from
+        the same kind of companies it's scored against."""
+        tickers = {
+            _ticker_from_question(m.get("question", ""))
+            for closed in (False, True)
+            for m in self.fetch_polymarket_earnings_markets(closed)
+        }
+        tickers.discard("")
+        logger.info("Found %d tickers with Polymarket earnings markets", len(tickers))
+        return sorted(tickers)
+
+    # ------------------------------------------------------------------
+    # Fixtures
+    # ------------------------------------------------------------------
 
     def _fixture_subset(self, platform: str) -> list[dict]:
         path = Path(Config.FIXTURES_DIR) / "contract_prices.json"
         if not path.exists():
             logger.warning("Fixture file %s not found", path)
             return []
-        records = json.loads(path.read_text())
-        subset = [r for r in records if r.get("platform") == platform]
-        logger.info(
-            "Loaded %d fixture %s contracts (USE_FIXTURES=true)",
-            len(subset),
-            platform,
-        )
+        subset = [r for r in json.loads(path.read_text()) if r.get("platform") == platform]
+        logger.info("Loaded %d fixture %s contracts (USE_FIXTURES=true)", len(subset), platform)
         return subset
 
-    def _upload_to_s3(self, records: list[dict]) -> None:
-        """Persist raw contract data to S3. No-op if AWS not configured."""
-        if not records or not Config.S3_BUCKET or not Config.AWS_ACCESS_KEY_ID:
-            return
-        if self._s3 is None:
-            import boto3
-
-            self._s3 = boto3.client(
-                "s3",
-                aws_access_key_id=Config.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=Config.AWS_SECRET_ACCESS_KEY,
-                region_name=Config.AWS_DEFAULT_REGION,
-            )
-
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        key = f"raw/contracts/{date_str}/prices.json"
-        self._s3.put_object(
-            Bucket=Config.S3_BUCKET,
-            Key=key,
-            Body=json.dumps(records).encode("utf-8"),
-            ContentType="application/json",
-        )
-
 
 # ----------------------------------------------------------------------
-# Platform-specific normalizers
+# Platform → common schema
 # ----------------------------------------------------------------------
 
 
-def _kalshi_to_common(m: dict) -> dict:
-    """Map a Kalshi market dict → common-schema fields.
+def _kalshi_to_common(m: dict, ticker: str) -> dict:
+    """Map a Kalshi market dict → common schema.
 
-    Kalshi prices come as integer cents (0-100); we convert to a 0-1 probability.
+    Kalshi returns prices as decimal-dollar strings (`yes_bid_dollars`,
+    `yes_ask_dollars`, `last_price_dollars`) and volume as `volume_fp`; the
+    integer-cent `yes_bid`/`yes_ask`/`volume` fields of an older API version
+    now read as 0 for every market.
     """
-    yes_bid_cents = m.get("yes_bid")
-    yes_ask_cents = m.get("yes_ask")
-    last_price_cents = m.get("last_price")
-
-    # Use mid of bid/ask if both present, else last_price, else 0.
-    if yes_bid_cents is not None and yes_ask_cents is not None:
-        price = (yes_bid_cents + yes_ask_cents) / 2 / 100
-    elif last_price_cents is not None:
-        price = last_price_cents / 100
+    yes_bid = _to_float(m.get("yes_bid_dollars"))
+    yes_ask = _to_float(m.get("yes_ask_dollars"))
+    last_price = _to_float(m.get("last_price_dollars"))
+    if yes_bid is not None and yes_ask is not None:
+        price = (yes_bid + yes_ask) / 2
+    elif last_price is not None:
+        price = last_price
     else:
         price = 0.0
 
     return {
         "contract_id": m.get("ticker", ""),
         "platform": "kalshi",
-        "ticker": _ticker_from_event(m.get("event_ticker", "")),
-        "event_type": _event_type_from_kalshi(m),
+        "ticker": ticker,
+        "event_type": "company_kpi",
         "event_date": (m.get("expected_expiration_time") or "")[:10],
         "price": price,
-        "volume": int(m.get("volume", 0) or 0),
+        "volume": int(_to_float(m.get("volume_fp")) or 0),
         "snapshot_ts": datetime.utcnow().isoformat() + "Z",
     }
 
 
 def _polymarket_to_common(m: dict) -> dict:
-    """Map a Polymarket Gamma market dict → common-schema fields."""
-    # Gamma's `outcomePrices` is a JSON-encoded list like '["0.62", "0.38"]'
-    raw_prices = m.get("outcomePrices")
+    """Map a Polymarket Gamma market dict → common schema."""
+    # Prefer the live order-book mid; fall back to Gamma's `outcomePrices`,
+    # a JSON-encoded list like '["0.62", "0.38"]' (YES first).
+    best_bid = _to_float(m.get("bestBid"))
+    best_ask = _to_float(m.get("bestAsk"))
     price = 0.0
-    try:
-        if isinstance(raw_prices, str):
-            parsed = json.loads(raw_prices)
-        else:
-            parsed = raw_prices or []
-        if parsed:
-            price = float(parsed[0])
-    except (ValueError, TypeError):
-        price = 0.0
+    if best_bid is not None and best_ask is not None and best_ask > 0:
+        price = (best_bid + best_ask) / 2
+    else:
+        try:
+            raw = m.get("outcomePrices")
+            parsed = json.loads(raw) if isinstance(raw, str) else (raw or [])
+            if parsed:
+                price = float(parsed[0])
+        except (ValueError, TypeError):
+            price = 0.0
 
-    end_date = (m.get("endDate") or "")[:10]
+    question = m.get("question", "") or ""
     return {
         "contract_id": str(m.get("id") or m.get("conditionId", "")),
         "platform": "polymarket",
-        "ticker": _ticker_from_question(m.get("question", "")),
-        "event_type": (m.get("category") or "").lower(),
-        "event_date": end_date,
+        "ticker": _ticker_from_question(question),
+        "event_type": "earnings_beat" if "earnings" in question.lower() else "",
+        "event_date": _release_date_from_slug(m.get("slug", "")) or (m.get("endDate") or "")[:10],
         "price": price,
         "volume": int(float(m.get("volumeNum", 0) or 0)),
         "snapshot_ts": datetime.utcnow().isoformat() + "Z",
     }
 
 
-# ----------------------------------------------------------------------
-# Tiny inference helpers — pure functions, easy to unit test
-# ----------------------------------------------------------------------
+def _to_float(value) -> float | None:
+    """Parse a numeric(-string) field, treating "" and None as missing."""
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
+
+# Earnings market slugs end with the expected release date and consensus
+# EPS, e.g. "cfg-quarterly-earnings-nongaap-eps-10-16-2026-1pt40". The
+# market's endDate is only a resolution deadline (often weeks later), so
+# the release date is what we time against.
+_SLUG_RELEASE_DATE_RE = re.compile(r"-(\d{2})-(\d{2})-(\d{4})-\d+pt\d+$")
+_PAREN_TICKER_RE = re.compile(r"\(([A-Z]{1,5}(?:\.[A-Z])?)\)")
 _TICKER_TOKEN_RE = re.compile(r"\b([A-Z]{1,5})\b")
 
 
-def _ticker_from_event(event_ticker: str) -> str:
-    """Best-effort ticker extraction from Kalshi event_ticker like 'EARNAAPL-26Q1'."""
-    if not event_ticker:
+def _release_date_from_slug(slug: str) -> str:
+    match = _SLUG_RELEASE_DATE_RE.search(slug or "")
+    if not match:
         return ""
-    match = _TICKER_TOKEN_RE.search(event_ticker.upper())
-    return match.group(1) if match else ""
+    month, day, year = match.groups()
+    return f"{year}-{month}-{day}"
 
 
 def _ticker_from_question(question: str) -> str:
-    """Best-effort ticker extraction from a Polymarket question string."""
+    """Ticker from a Polymarket question. Earnings questions carry it in
+    parentheses ("Will FedEx (FDX) beat ...?"); the bare all-caps token is a
+    fallback that can misfire on other capitalized words."""
     if not question:
         return ""
+    paren = _PAREN_TICKER_RE.search(question)
+    if paren:
+        return paren.group(1)
     match = _TICKER_TOKEN_RE.search(question)
     return match.group(1) if match else ""
-
-
-def _event_type_from_kalshi(m: dict) -> str:
-    """Bucket Kalshi markets into our event_type taxonomy."""
-    event_ticker = (m.get("event_ticker") or "").upper()
-    if "EARN" in event_ticker:
-        return "earnings_beat"
-    if "CPI" in event_ticker:
-        return "cpi"
-    if "FED" in event_ticker:
-        return "fed_decision"
-    return (m.get("category") or "").lower()

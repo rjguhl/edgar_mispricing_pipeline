@@ -123,3 +123,132 @@ class TestFlagMispricings:
         out = flag_mispricings(pd.DataFrame(), pd.DataFrame())
         assert out.empty
         assert "signal" in out.columns
+
+
+class TestNewTranscriptFeatures:
+    def test_extra_fields_and_quarter_over_quarter_change(self):
+        events = pd.DataFrame(
+            [
+                {"ticker": "AAPL", "filing_date": "2026-01-29", "sentiment_score": 0.8,
+                 "forward_guidance": "raised", "management_tone": "confident",
+                 "revenue_surprise_indicator": "beat", "analyst_sentiment": "positive",
+                 "risk_flags": ["fx"]},
+                {"ticker": "AAPL", "filing_date": "2026-04-30", "sentiment_score": 0.5,
+                 "forward_guidance": "maintained", "management_tone": "cautious",
+                 "revenue_surprise_indicator": "miss", "analyst_sentiment": "negative",
+                 "risk_flags": ["fx", "tariffs", "china"]},
+            ]
+        )
+        feats = encode_features(events, _sample_macro()).sort_values("event_date")
+        first, second = feats.iloc[0], feats.iloc[1]
+        assert first["sentiment_change"] == 0.0  # no prior quarter
+        assert abs(second["sentiment_change"] - (-0.3)) < 1e-9
+        assert second["forward_guidance_change"] == -1.0
+        assert second["revenue_surprise_score"] == -1.0
+        assert second["analyst_sentiment_score"] == -1.0
+        assert second["risk_flag_count"] == 3.0
+
+
+class TestEpsSurprise:
+    def test_matches_nearest_earnings_date_and_clips(self, monkeypatch):
+        from src.processing import eps_surprise
+
+        history = pd.DataFrame(
+            {
+                "earnings_date": pd.to_datetime(["2026-01-29", "2026-04-30"]),
+                "eps_estimate": [2.00, 0.01],
+                "reported_eps": [2.10, 0.20],
+                "eps_surprise_pct": [5.0, 1900.0],
+            }
+        )
+        monkeypatch.setattr(eps_surprise, "fetch_eps_history", lambda t: history)
+        events = pd.DataFrame(
+            {
+                "ticker": ["AAPL", "AAPL", "AAPL"],
+                "filing_date": ["2026-01-30", "2026-05-01", "2026-03-15"],
+            }
+        )
+        out = eps_surprise.attach_eps_surprise(events)
+        assert out.loc[0, "eps_surprise_pct"] == 5.0
+        assert out.loc[0, "eps_beat"] == 1.0
+        assert out.loc[1, "eps_surprise_pct"] == eps_surprise.SURPRISE_CLIP_PCT
+        assert np.isnan(out.loc[2, "eps_surprise_pct"])  # no release within window
+
+
+class TestContractMatching:
+    def test_matches_latest_filing_before_release_and_skips_stale(self):
+        scored = pd.DataFrame(
+            {
+                "ticker": ["CFG", "CFG", "MTB"],
+                "event_date": ["2026-04-15", "2026-07-16", "2026-01-15"],
+                "model_prob": [0.40, 0.90, 0.70],
+            }
+        )
+        contracts = pd.DataFrame(
+            {
+                "ticker": ["CFG", "MTB"],
+                "event_date": ["2026-10-16", "2026-10-16"],
+                "platform": ["polymarket", "polymarket"],
+                "market_probability": [0.70, 0.70],
+                "volume": [100, 100],
+            }
+        )
+        out = flag_mispricings(scored, contracts, threshold=0.10)
+        # CFG pairs with its July filing (latest before release); MTB's only
+        # filing is 9 months old — stale, so no signal row at all.
+        assert list(out["ticker"]) == ["CFG"]
+        assert out.iloc[0]["filing_date"] == pd.Timestamp("2026-07-16")
+        assert np.isclose(out.iloc[0]["divergence"], 0.20)
+
+
+class TestPolymarketReleaseDate:
+    def test_release_date_parsed_from_slug(self):
+        from src.ingestion.contract_client import _release_date_from_slug
+
+        assert _release_date_from_slug("cfg-quarterly-earnings-nongaap-eps-10-16-2026-1pt40") == "2026-10-16"
+        assert _release_date_from_slug("some-other-market") == ""
+
+
+class TestBeatModelFeatures:
+    def test_release_features_and_next_quarter_label(self):
+        from src.modeling.beat_model import release_features
+
+        history = pd.DataFrame(
+            {
+                "earnings_date": pd.to_datetime(
+                    ["2025-01-15", "2025-04-15", "2025-07-15", "2025-10-15", "2026-06-15"]
+                ),
+                "eps_estimate": [1.0, 1.0, 1.0, 1.0, 1.0],
+                "reported_eps": [1.1, 1.2, 0.9, 1.05, 1.3],
+                "eps_surprise_pct": [10.0, 20.0, -10.0, 5.0, 30.0],
+            }
+        )
+        f = release_features(history)
+        assert list(f["eps_beat"]) == [1.0, 1.0, 0.0, 1.0, 1.0]
+        assert list(f["beat_streak"]) == [1.0, 2.0, 0.0, 1.0, 2.0]
+        assert f.loc[3, "trailing_beat_rate"] == 0.75
+        # next_beat is the following release's outcome; NaN when the next
+        # release is > 1 quarter away (2025-10 → 2026-06) or doesn't exist.
+        assert f.loc[0, "next_beat"] == 1.0
+        assert f.loc[1, "next_beat"] == 0.0
+        assert np.isnan(f.loc[3, "next_beat"])
+        assert np.isnan(f.loc[4, "next_beat"])
+
+
+class TestBacktestScoring:
+    def test_trade_simulation_pnl(self):
+        from src.modeling.backtest import simulate_trades
+
+        bt = pd.DataFrame(
+            {
+                "model_prob": [0.9, 0.2, 0.55],
+                "market_prob": [0.6, 0.7, 0.50],
+                "outcome": [1, 1, 0],
+            }
+        )
+        out = simulate_trades(bt, threshold=0.10)
+        # Row 0: buy YES at 0.60, wins → +0.40. Row 1: buy NO at 0.30, loses → -0.30.
+        # Row 2: divergence 0.05 is under the threshold → no trade.
+        assert out["trades"] == 2 and out["buy_yes"] == 1 and out["buy_no"] == 1
+        assert np.isclose(out["total_pnl"], 0.10)
+        assert np.isclose(out["return_on_cost"], 0.10 / 0.90)

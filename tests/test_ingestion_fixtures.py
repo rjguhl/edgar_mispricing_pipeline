@@ -65,3 +65,59 @@ class TestContractFixtures:
         for r in all_records:
             assert 0 <= r["price"] <= 1
             assert r["volume"] >= 0
+
+
+class TestPolymarketNormalizer:
+    def test_earnings_market_maps_ticker_and_mid_price(self):
+        from src.ingestion.contract_client import _polymarket_to_common
+
+        rec = _polymarket_to_common(
+            {
+                "id": "4440714",
+                "question": "Will FedEx (FDX) beat quarterly earnings?",
+                "outcomePrices": '["0.35", "0.65"]',
+                "bestBid": 0.28,
+                "bestAsk": 0.42,
+                "volumeNum": 5736.4,
+                "endDate": "2026-10-28T20:00:00Z",
+            }
+        )
+        assert rec["ticker"] == "FDX"
+        assert rec["event_type"] == "earnings_beat"
+        assert rec["event_date"] == "2026-10-28"
+        assert abs(rec["price"] - 0.35) < 1e-9
+        assert rec["volume"] == 5736
+
+    def test_falls_back_to_outcome_prices_without_book(self):
+        from src.ingestion.contract_client import _polymarket_to_common
+
+        rec = _polymarket_to_common(
+            {"question": "Will Truist (TFC) beat quarterly earnings?", "outcomePrices": '["0.4", "0.6"]'}
+        )
+        assert rec["ticker"] == "TFC"
+        assert abs(rec["price"] - 0.4) < 1e-9
+
+
+class TestDedupeEarningsEvents:
+    def test_drops_10q_filed_right_after_8k(self):
+        from src.ingestion.edgar_client import dedupe_earnings_events
+
+        kept = dedupe_earnings_events(
+            [
+                {"ticker": "AAPL", "form": "8-K", "filing_date": "2026-07-30"},
+                {"ticker": "AAPL", "form": "10-Q", "filing_date": "2026-07-31"},
+                {"ticker": "MSFT", "form": "10-Q", "filing_date": "2026-07-31"},
+            ]
+        )
+        assert [(t["ticker"], t["form"]) for t in kept] == [("AAPL", "8-K"), ("MSFT", "10-Q")]
+
+    def test_keeps_10q_outside_window(self):
+        from src.ingestion.edgar_client import dedupe_earnings_events
+
+        kept = dedupe_earnings_events(
+            [
+                {"ticker": "AAPL", "form": "8-K", "filing_date": "2026-01-29"},
+                {"ticker": "AAPL", "form": "10-Q", "filing_date": "2026-05-01"},
+            ]
+        )
+        assert len(kept) == 2
