@@ -286,3 +286,16 @@ class TestOrderBookSummary:
 
         out = summarize_book({"bids": [{"price": "0.60", "size": "50"}], "asks": []})
         assert out["best_ask"] is None and out["spread"] is None and out["mid"] is None
+
+
+class TestCalibrationRegression:
+    def test_recovers_calibrated_market(self):
+        from src.research.beat_pricing import calibration_regression
+
+        rng = np.random.default_rng(0)
+        price = pd.Series(rng.uniform(0.05, 0.95, 4000))
+        df = pd.DataFrame({"market_prob": price, "outcome": (rng.uniform(size=4000) < price).astype(int)})
+        out = calibration_regression(df)
+        assert abs(out["intercept"]) < 0.15
+        assert abs(out["slope"] - 1) < 0.15
+        assert out["joint_p"] > 0.01

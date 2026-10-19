@@ -1,12 +1,17 @@
 name: Order-book snapshots
 
-# Hourly snapshot of every open Polymarket earnings contract's order book,
-# committed to the `orderbook-data` branch (kept off main so code history
-# stays clean). See src/ingestion/orderbook_collector.py.
+# Order-book snapshot of every open Polymarket earnings contract every 30
+# minutes, committed to the `orderbook-data` branch (kept off main so code
+# history stays clean). See src/ingestion/orderbook_collector.py.
+#
+# GitHub delays and drops scheduled runs on free accounts (an hourly cron ran
+# about every 4 hours), so each run stays alive and snapshots on its own
+# timer for ~5.5 hours; the concurrency group queues the next run to start
+# as soon as this one ends, keeping coverage continuous.
 
 on:
   schedule:
-    - cron: "17 * * * *"  # hourly; off the top of the hour to dodge scheduler congestion
+    - cron: "17 * * * *"  # off the top of the hour to dodge scheduler congestion
   workflow_dispatch:
 
 permissions:
@@ -19,7 +24,7 @@ concurrency:
 jobs:
   snapshot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -44,13 +49,19 @@ jobs:
             git -C data-branch rm -rfq .
           fi
 
-      - name: Snapshot order books
-        run: python -m src.ingestion.orderbook_collector --out data-branch/snapshots
-
-      - name: Commit snapshots
+      - name: Snapshot every 30 minutes for ~5.5 hours
         run: |
-          cd data-branch
-          git add snapshots
-          git diff --cached --quiet && exit 0
-          git commit -qm "Order-book snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
-          git push origin orderbook-data
+          end=$((SECONDS + 19800))
+          while :; do
+            if python -m src.ingestion.orderbook_collector --out data-branch/snapshots; then
+              git -C data-branch add snapshots
+              if ! git -C data-branch diff --cached --quiet; then
+                git -C data-branch commit -qm "Order-book snapshot $(date -u +%Y-%m-%dT%H:%MZ)"
+                git -C data-branch push -q origin orderbook-data || echo "push failed; will retry next cycle"
+              fi
+            else
+              echo "snapshot failed; will retry next cycle"
+            fi
+            [ $SECONDS -ge $end ] && break
+            sleep 1800
+          done

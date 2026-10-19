@@ -34,7 +34,10 @@ Trained on 8,628 releases from the 406 companies Polymarket has listed earnings 
 
 The market is well calibrated and clearly beats a model built on EPS history alone; blending the model into the market price doesn't improve it. No simulated strategy shows a significant edge (best: +1.7¢ per $1 contract, 95% CI [−0.4¢, +3.8¢]), and live order books show a median bid/ask spread of 29¢ — far larger than any edge.
 
-**4. Live order books** (`src/ingestion/orderbook_collector.py`)
+**4. Market efficiency research** (`src/research/beat_pricing.py`)
+Overall calibrated, with two exploratory leads — non-GAAP beats underpriced by 3.8¢ (significant after multiple-testing correction) and late price moves overshooting — now under a [pre-registered](PREREGISTRATION.md) out-of-sample test at executable prices.
+
+**5. Live order books** (`src/ingestion/orderbook_collector.py`)
 Hourly snapshots of every open earnings contract's bid/ask and depth, collected by GitHub Actions onto the `orderbook-data` branch, for execution-realistic testing as contracts resolve.
 
 ## How it works
@@ -64,6 +67,7 @@ cp .env.example .env              # ANTHROPIC_API_KEY, FRED_API_KEY, EDGAR_USER_
 python -m src.pipeline            # live signals vs. open Polymarket contracts (no Claude calls)
 python -m src.modeling.beat_model # retrain the beat model (free: Yahoo data only)
 python -m src.modeling.backtest   # model vs. market on resolved contracts (free)
+python -m src.research.beat_pricing  # calibration / slice / price-dynamics study
 python -m src.ingestion.orderbook_collector  # one order-book snapshot (runs hourly in GitHub Actions)
 python -m src.modeling.train --tickers AAPL MSFT ... --lookback-days 1095 --cached-only
                                   # price-reaction model; --cached-only never calls Claude
@@ -80,6 +84,7 @@ src/
 ├── ingestion/     edgar_client.py, fred_client.py, contract_client.py, orderbook_collector.py
 ├── processing/    transcript_extractor.py, price_labels.py, eps_surprise.py, macro_features.py
 ├── modeling/      train.py, beat_model.py, backtest.py, scorer.py, signal.py, model.py
+├── research/      beat_pricing.py
 ├── dashboard/     app.py
 └── pipeline.py
 tests/             unit tests (run in CI on every push)

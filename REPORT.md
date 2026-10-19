@@ -17,7 +17,8 @@ All numbers below are reproducible with the commands in [Reproducing](#reproduci
 | 3 | **LLM text features don't predict the price reaction** to earnings | Walk-forward AUC 0.50 (text only); no feature significant | High |
 | 4 | **EPS surprise vs. consensus does** (modestly) | Spearman ρ = +0.16, p = 0.007; walk-forward AUC 0.54 | Medium |
 | 5 | **Beats are predictable from beat history** | Beat model: Brier 0.169 vs 0.185 base rate, AUC 0.69 on 2,157 held-out releases | High |
-| 6 | **No tradable edge** | Best strategy (buy YES on every contract) +1.7¢/contract, 95% CI [−0.4¢, +3.8¢], before a median 29¢ bid/ask spread | High |
+| 6 | **Two candidate inefficiencies: non-GAAP beats underpriced; late moves overshoot** | +3.8¢ (BH q = 0.04) and +8.1¢ before spreads; the second may be bid-ask bounce | Low — exploratory; pre-registered out-of-sample test running |
+| 7 | **No tradable edge yet** | Best strategy (buy YES on every contract) +1.7¢/contract, 95% CI [−0.4¢, +3.8¢], before a median 29¢ bid/ask spread | High |
 
 ---
 
@@ -61,6 +62,42 @@ The actual beat rate sits slightly *above* the price in most buckets (overall 74
 None of these is a demonstrated edge: every interval includes zero, and the figures use last-trade prices, not executable ones. Live order-book snapshots show a **median bid/ask spread of 29¢** across open earnings contracts — many sit at placeholder quotes (bid ≈ 0.20, ask ≈ 0.90) until about a week before release — and only a handful trade at 1–5¢ spreads. Crossing that spread costs far more than the 1–3¢ the simulated strategies earn.
 
 An earlier run on 1,111 contracts showed buy-YES-everything at +2.2¢ with a CI just touching zero. A slug-parsing bug had excluded every contract with a negative EPS consensus (loss-making companies); with those 145 contracts restored, the effect shrank to +1.7¢ and lost significance. This is the main reason small backtest edges shouldn't be trusted until they survive the full sample and realistic costs.
+
+---
+
+## 2a. How efficiently does Polymarket price beats?
+
+`src/research/beat_pricing.py`, same 1,256 contracts and cached price histories.
+
+**Calibration regression** — logit P(beat) = a + b · logit(price). A calibrated market has a = 0, b = 1.
+
+| | Estimate | 95% CI | p |
+|---|---|---|---|
+| a (bias toward beats) | +0.142 | [−0.039, +0.323] | 0.13 |
+| b (slope) | 0.970 | [0.839, 1.102] | 0.66 (vs. 1) |
+| Joint test a = 0, b = 1 | | | 0.26 |
+
+Overall the market is calibrated: no significant bias, and prices are neither too extreme nor too timid.
+
+**Slices** (17 tested; Benjamini-Hochberg correction). Only one survives:
+
+| Slice | n | Avg price | Beat rate | Edge | 95% CI | BH q |
+|---|---|---|---|---|---|---|
+| **Non-GAAP EPS contracts** | 792 | 77.7% | 81.4% | **+3.8¢** | [+1.3¢, +6.2¢] | **0.04** |
+| GAAP EPS contracts | 464 | 65.5% | 63.6% | −1.9¢ | [−5.7¢, +1.9¢] | 0.56 |
+
+The non-GAAP edge holds with each company weighted equally (+3.5¢, 239 companies) and is positive in every price bucket, but it is uneven over time (+8.9¢ and +5.7¢ in two quarters, ≈ 0 in the other two). A plausible mechanism: companies have discretion over non-GAAP EPS and tend to manage it to just clear consensus.
+
+**Price dynamics** — the market learns as the release approaches (contracts priced at every horizon, n = 1,168):
+
+| Days before release | 5 | 3 | 1 | Release eve |
+|---|---|---|---|---|
+| Brier | 0.157 | 0.147 | 0.144 | 0.140 |
+| ROC AUC | 0.741 | 0.781 | 0.786 | 0.803 |
+
+Late moves are informative (61% of ≥ 5-point moves go toward the eventual outcome) but **overshoot**: regressing the outcome on the final price plus the 3-day drift gives a drift coefficient of −0.34 (95% CI [−0.58, −0.10], p = 0.006). Betting against ≥ 10-point moves earned +8.1¢ per contract (n = 309, CI [+3.4¢, +12.9¢]) before spreads. The effect is weaker in the highest-volume third (+4.3¢, CI includes 0), which fits an alternative explanation: **bid-ask bounce** in last-trade prices, not genuine overreaction. Last-trade data can't separate the two.
+
+**Both leads were found by searching the data**, so they are being tested out of sample at executable prices under a fixed, pre-committed plan: [PREREGISTRATION.md](PREREGISTRATION.md) (contracts releasing Oct 20 – Dec 31, 2026; analysis on Jan 5, 2027).
 
 ---
 
@@ -139,7 +176,7 @@ Cost controls: extraction cache keyed by (model, filing), `--cached-only` traini
 
 ## 7. What would be worth doing next
 
-1. **Execution-realistic testing.** Hourly order-book snapshots of every open earnings contract are now collected automatically (`src/ingestion/orderbook_collector.py`, GitHub Actions → `orderbook-data` branch). As contracts resolve, re-test at executable prices, measure how spreads and prices evolve into the release, and paper-trade a pre-registered strategy restricted to tight-spread markets.
+1. **Execution-realistic testing.** Order-book snapshots of every open earnings contract (every 30 minutes) are now collected automatically (`src/ingestion/orderbook_collector.py`, GitHub Actions → `orderbook-data` branch). As contracts resolve, re-test at executable prices, measure how spreads and prices evolve into the release, and paper-trade a pre-registered strategy restricted to tight-spread markets.
 2. **Use the LLM on what the market doesn't price well:** earnings-call *Q&A* transcripts (not press releases), or guidance language for small caps with little analyst coverage.
 3. **Kalshi/Polymarket "mention" markets** ("Will the CEO say X on the call?") — a direct fit for transcript NLP.
 
@@ -150,6 +187,7 @@ Cost controls: extraction cache keyed by (model, filing), `--cached-only` traini
 ```bash
 python -m src.modeling.beat_model     # beat model (free; Yahoo data)
 python -m src.modeling.backtest       # §2 (free; Polymarket + Yahoo)
+python -m src.research.beat_pricing   # §2a (run after the backtest)
 python -m src.modeling.train --tickers AAPL MSFT GOOGL AMZN META NVDA TSLA JPM V JNJ WMT XOM PG MA HD CVX KO PEP ABBV COST \
     --lookback-days 1095 --cached-only  # §3 (free with the extraction cache; otherwise ~$0.25 on Haiku)
 python -m src.pipeline                # live signals vs. open contracts (free)
